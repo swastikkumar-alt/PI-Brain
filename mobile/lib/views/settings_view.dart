@@ -282,71 +282,142 @@ class _SettingsViewState extends State<SettingsView> {
   }
 
   Future<void> _showBackendSettingsDialog() async {
-    final urlController = TextEditingController(
-      text: _backendSettings.gatewayUrl,
-    );
-    final tokenController = TextEditingController();
-
-    final saved = await showDialog<bool>(
+    final result = await showDialog<_BackendSettingsDialogResult>(
       context: context,
-      builder: (context) {
-        return AlertDialog(
-          title: const Text('AI Backend'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextField(
-                controller: urlController,
-                decoration: const InputDecoration(
-                  labelText: 'Gateway URL',
-                  hintText:
-                      'https://pie-llm-gateway.example.workers.dev/api/v1',
-                ),
-                keyboardType: TextInputType.url,
+      builder: (context) => _BackendSettingsDialog(
+        initialGatewayUrl: _backendSettings.gatewayUrl,
+        hasBearerToken: _backendSettings.hasBearerToken,
+      ),
+    );
+
+    if (!mounted || result == null) return;
+
+    // Let the dialog route and focused text fields fully deactivate before
+    // writing secure storage and refreshing the Settings tree.
+    await Future<void>.delayed(const Duration(milliseconds: 120));
+    if (result.reset) {
+      await _gatewaySettings.clear();
+    } else {
+      await _gatewaySettings.save(
+        gatewayUrl: result.gatewayUrl,
+        bearerToken: result.bearerToken,
+      );
+    }
+    if (mounted) await _refresh();
+  }
+}
+
+class _BackendSettingsDialogResult {
+  const _BackendSettingsDialogResult._({
+    required this.reset,
+    required this.gatewayUrl,
+    required this.bearerToken,
+  });
+
+  const _BackendSettingsDialogResult.reset()
+    : this._(reset: true, gatewayUrl: '', bearerToken: null);
+
+  const _BackendSettingsDialogResult.save({
+    required String gatewayUrl,
+    required String bearerToken,
+  }) : this._(reset: false, gatewayUrl: gatewayUrl, bearerToken: bearerToken);
+
+  final bool reset;
+  final String gatewayUrl;
+  final String? bearerToken;
+}
+
+class _BackendSettingsDialog extends StatefulWidget {
+  const _BackendSettingsDialog({
+    required this.initialGatewayUrl,
+    required this.hasBearerToken,
+  });
+
+  final String initialGatewayUrl;
+  final bool hasBearerToken;
+
+  @override
+  State<_BackendSettingsDialog> createState() => _BackendSettingsDialogState();
+}
+
+class _BackendSettingsDialogState extends State<_BackendSettingsDialog> {
+  late final TextEditingController _urlController;
+  late final TextEditingController _tokenController;
+
+  @override
+  void initState() {
+    super.initState();
+    _urlController = TextEditingController(text: widget.initialGatewayUrl);
+    _tokenController = TextEditingController();
+  }
+
+  @override
+  void dispose() {
+    _urlController.dispose();
+    _tokenController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('AI Backend'),
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: _urlController,
+              decoration: const InputDecoration(
+                labelText: 'Gateway URL',
+                hintText: 'https://pie-llm-gateway.example.workers.dev/api/v1',
               ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: tokenController,
-                decoration: InputDecoration(
-                  labelText: 'Bearer token',
-                  hintText: _backendSettings.hasBearerToken
-                      ? 'Leave blank to keep current token'
-                      : 'Optional',
-                ),
-                obscureText: true,
+              keyboardType: TextInputType.url,
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _tokenController,
+              decoration: InputDecoration(
+                labelText: 'Bearer token',
+                hintText: widget.hasBearerToken
+                    ? 'Leave blank to keep current token'
+                    : 'Optional',
               ),
-            ],
-          ),
-          actions: [
-            TextButton(
-              onPressed: () async {
-                await _gatewaySettings.clear();
-                if (context.mounted) Navigator.pop(context, true);
-              },
-              child: const Text('Reset'),
-            ),
-            TextButton(
-              onPressed: () => Navigator.pop(context, false),
-              child: const Text('Cancel'),
-            ),
-            FilledButton(
-              onPressed: () async {
-                await _gatewaySettings.save(
-                  gatewayUrl: urlController.text,
-                  bearerToken: tokenController.text,
-                );
-                if (context.mounted) Navigator.pop(context, true);
-              },
-              child: const Text('Save'),
+              obscureText: true,
             ),
           ],
-        );
-      },
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () {
+            FocusScope.of(context).unfocus();
+            Navigator.pop(context, const _BackendSettingsDialogResult.reset());
+          },
+          child: const Text('Reset'),
+        ),
+        TextButton(
+          onPressed: () {
+            FocusScope.of(context).unfocus();
+            Navigator.pop(context);
+          },
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: () {
+            FocusScope.of(context).unfocus();
+            Navigator.pop(
+              context,
+              _BackendSettingsDialogResult.save(
+                gatewayUrl: _urlController.text,
+                bearerToken: _tokenController.text,
+              ),
+            );
+          },
+          child: const Text('Save'),
+        ),
+      ],
     );
-
-    urlController.dispose();
-    tokenController.dispose();
-    if (saved == true) await _refresh();
   }
 }
 
