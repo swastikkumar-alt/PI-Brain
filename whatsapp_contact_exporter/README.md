@@ -1,17 +1,46 @@
-# whatsapp_contact_exporter
+# PIE WhatsApp Contact Exporter
 
-A new Flutter project.
+Separate Flutter Android app for user-approved WhatsApp group/contact export
+workflows. This app is independent from PIE Mobile and is intended for the
+owner's own device/session only.
 
-## Getting Started
+## What It Does
 
-This project is a starting point for a Flutter application.
+- Imports local Android contacts with user permission.
+- Provides WhatsApp Web and Android capture workflows for group/member review.
+- Lets the user review captured group/member data before saving.
+- Exports CSV, XLSX, JSON and vCard files.
+- Supports admin/member filters and deduped global export modes.
 
-A few resources to get you started if this is your first Flutter project:
+## Safety Rules
 
-- [Learn Flutter](https://docs.flutter.dev/get-started/learn-flutter)
-- [Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Flutter learning resources](https://docs.flutter.dev/reference/learning-resources)
+- No hidden harvesting.
+- No cross-account extraction.
+- No bypassing WhatsApp privacy controls.
+- No silent background sync into PIE.
+- If phone numbers are not visible, the app stores visible names/IDs only and
+  marks confidence accordingly.
 
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+## Development
+
+```powershell
+cd whatsapp_contact_exporter
+flutter pub get
+flutter analyze
+flutter test
+flutter build apk --debug
+```
+
+## Android Notes
+
+- Package: `com.personalintelligence.whatsappexporter`
+- App label: `PIE WhatsApp Exporter`
+- Web extraction uses a WebView-based WhatsApp Web session.
+- Android capture uses explicit user review and Accessibility-style visible
+  screen capture flows where applicable.
+
+## Exports
+
+Generated files are local user data and should not be committed. The root
+`.gitignore` excludes common screenshots, XML dumps, APKs and local export
+artifacts.

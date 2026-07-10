@@ -10,6 +10,7 @@ import '../services/datasource_connector_registry.dart';
 import '../services/local_ingestion_service.dart';
 import '../services/native_contact_service.dart';
 import '../services/native_datasource_service.dart';
+import '../services/spending_insight_service.dart';
 import '../services/sync_service.dart';
 import '../services/notification_service.dart';
 import 'memory_view.dart';
@@ -33,6 +34,8 @@ class _DashboardViewState extends State<DashboardView> {
       NativeDatasourceService.instance;
   final NativeContactService _contactService = NativeContactService.instance;
   final AccessibilityBridge _accessibilityBridge = AccessibilityBridge.instance;
+  final SpendingInsightService _spendingInsightService =
+      SpendingInsightService();
 
   int _entityCount = 0;
   String _syncStatusText = 'Online';
@@ -123,6 +126,8 @@ class _DashboardViewState extends State<DashboardView> {
         await _connectNotificationStream(connector);
       case DatasourceConnectorMode.nativeSmsImport:
         await _importSmsMessages(connector);
+      case DatasourceConnectorMode.nativeCallLogImport:
+        await _importCallLogs(connector);
       case DatasourceConnectorMode.healthConnect:
         await _connectHealthData(connector);
     }
@@ -260,9 +265,8 @@ class _DashboardViewState extends State<DashboardView> {
       return;
     }
 
-    final cloudSynced = result.imported > 0
-        ? await _syncService.synchronize()
-        : false;
+    await _spendingInsightService.backfillLedger();
+    await DatabaseService.instance.repairSearchIndex();
     await _refreshStats();
     if (!mounted) return;
     setState(() {
@@ -270,11 +274,41 @@ class _DashboardViewState extends State<DashboardView> {
       connector.lastSync = result.imported > 0 ? 'Just Now' : 'No Changes';
       if (result.imported == 0 && result.skippedDuplicates > 0) {
         _syncStatusText =
-            'No new SMS. Skipped ${result.skippedDuplicates} duplicate message(s); no sync queued.';
+            'No new SMS. Skipped ${result.skippedDuplicates} duplicate message(s).';
       } else {
         _syncStatusText =
-            'Imported ${result.imported} SMS; skipped ${result.skippedDuplicates} duplicates. ${cloudSynced ? 'Synced.' : 'Backend sync pending.'}';
+            'Imported ${result.imported} SMS locally; skipped ${result.skippedDuplicates} duplicates. Spend ledger updated.';
       }
+    });
+  }
+
+  Future<void> _importCallLogs(ConnectorRuntimeState connector) async {
+    if (!mounted) return;
+    setState(() {
+      connector.status = 'SYNCING';
+      _syncStatusText = 'Checking Call Log permission...';
+    });
+
+    final result = await _nativeDatasourceService.importRecentCalls();
+    if (!mounted) return;
+
+    if (result.isBlocked) {
+      setState(() {
+        connector.status = 'BLOCKED';
+        _syncStatusText = result.blockedReason!;
+      });
+      return;
+    }
+
+    await DatabaseService.instance.repairSearchIndex();
+    await _refreshStats();
+    if (!mounted) return;
+    setState(() {
+      connector.status = 'SUCCESS';
+      connector.lastSync = result.imported > 0 ? 'Just Now' : 'No Changes';
+      _syncStatusText = result.imported == 0
+          ? 'No new call logs. Skipped ${result.skippedDuplicates} duplicate call(s).'
+          : 'Imported ${result.imported} call log item(s) locally; skipped ${result.skippedDuplicates} duplicates.';
     });
   }
 
@@ -292,9 +326,29 @@ class _DashboardViewState extends State<DashboardView> {
     }
 
     setState(() {
-      connector.status = 'BLOCKED';
-      _syncStatusText =
-          'Health Connect is available. Steps/sleep read permissions need the Health Connect SDK integration before importing records.';
+      connector.status = 'SYNCING';
+      _syncStatusText = 'Importing Health Connect steps and sleep...';
+    });
+
+    final result = await _nativeDatasourceService.importHealthSummary();
+    if (!mounted) return;
+    if (result.isBlocked) {
+      setState(() {
+        connector.status = 'BLOCKED';
+        _syncStatusText = result.blockedReason!;
+      });
+      return;
+    }
+
+    await DatabaseService.instance.repairSearchIndex();
+    await _refreshStats();
+    if (!mounted) return;
+    setState(() {
+      connector.status = 'SUCCESS';
+      connector.lastSync = result.imported > 0 ? 'Just Now' : 'No Changes';
+      _syncStatusText = result.imported == 0
+          ? 'No new Health Connect rows. Skipped ${result.skippedDuplicates} duplicate day(s).'
+          : 'Imported ${result.imported} health day(s) locally; skipped ${result.skippedDuplicates} duplicates.';
     });
   }
 
@@ -885,7 +939,7 @@ class _DashboardViewState extends State<DashboardView> {
       'whatsapp_context' => 'WhatsApp Notifications',
       'notifications' => 'Payment and App Notifications',
       'health_connect' => 'Health Connect',
-      'sms_calls_future' => 'Call Logs',
+      'call_logs' => 'Call Logs',
       _ => fallback,
     };
   }

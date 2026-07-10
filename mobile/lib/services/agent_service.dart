@@ -14,20 +14,29 @@ import 'app_config.dart';
 import 'agent_prompt_policy.dart';
 import 'database_service.dart';
 import 'gateway_settings_service.dart';
+import 'image_generation_service.dart';
+import 'local_data_freshness_service.dart';
 import 'local_query_context_service.dart';
-import 'local_device_insight_service.dart';
+import 'local_question_router.dart';
 import 'spending_insight_service.dart';
 
 class AgentService {
   final DatabaseService _db = DatabaseService.instance;
-  final SpendingInsightService _spendingInsight = SpendingInsightService();
-  final LocalDeviceInsightService _localDeviceInsight =
-      LocalDeviceInsightService();
+  late final ImageGenerationService _imageGeneration = ImageGenerationService(
+    gatewayUrlProvider: _gatewayUrl,
+    headersProvider: _jsonHeaders,
+  );
+  final LocalQuestionRouter _localQuestionRouter = LocalQuestionRouter(
+    spendingInsight: SpendingInsightService(),
+  );
+  final LocalDataFreshnessService _freshness =
+      LocalDataFreshnessService.instance;
   final LocalQueryContextService _localQueryContext =
       LocalQueryContextService();
   final AgentPromptPolicy _promptPolicy = const AgentPromptPolicy();
   final _uuid = const Uuid();
   final _gatewaySettings = GatewaySettingsService.instance;
+  ImageGenerationResult? _pendingImageHandoff;
 
   String hostUrl = AppConfig.gatewayBaseUrl;
   bool useLocalOllamaDirect = false;
@@ -45,6 +54,12 @@ class AgentService {
   Future<String> _gatewayUrl() async {
     if (hostUrl != AppConfig.gatewayBaseUrl) return hostUrl;
     return _gatewaySettings.getGatewayBaseUrl();
+  }
+
+  ImageGenerationResult? consumePendingImageHandoff() {
+    final handoff = _pendingImageHandoff;
+    _pendingImageHandoff = null;
+    return handoff?.handoffRequired == true ? handoff : null;
   }
 
   String _truncate(String value, int maxChars) {
@@ -99,59 +114,32 @@ class AgentService {
     );
     await _db.insertMessage(userMsg);
 
-    final spendingInsight = await _spendingInsight.answerIfSupported(
-      userMessage,
-    );
-    if (spendingInsight != null) {
-      final citations = <Citation>[
-        for (
-          var index = 0;
-          index < spendingInsight.transactions.length && index < 10;
-          index++
-        )
-          Citation(
-            documentId: spendingInsight.transactions[index].entityId,
-            title:
-                'Spend evidence (${spendingInsight.transactions[index].sourceConnector})',
-            chunkIndex: index,
-          ),
-      ];
+    if (_imageGeneration.canHandle(userMessage)) {
+      final imageResult = await _imageGeneration.generate(userMessage);
+      _pendingImageHandoff = imageResult.handoffRequired ? imageResult : null;
       final agentMsg = Message(
         id: _uuid.v4(),
         conversationId: conversationId,
         sender: MessageSender.agent,
-        text: spendingInsight.answer,
+        text: imageResult.answerText,
         timestamp: DateTime.now(),
-        citations: citations,
+        citations: const [],
       );
       await _db.insertMessage(agentMsg);
       return agentMsg;
     }
 
-    final localDeviceInsight = await _localDeviceInsight.answerIfSupported(
-      userMessage,
-    );
-    if (localDeviceInsight != null) {
-      final citations = <Citation>[
-        for (
-          var index = 0;
-          index < localDeviceInsight.evidence.length && index < 10;
-          index++
-        )
-          Citation(
-            documentId: localDeviceInsight.evidence[index].id,
-            title:
-                'Local evidence (${localDeviceInsight.evidence[index].sourceConnector ?? 'unknown'})',
-            chunkIndex: index,
-          ),
-      ];
+    await _freshness.refreshForQuery(userMessage);
+
+    final groundedAnswer = await _localQuestionRouter.answer(userMessage);
+    if (groundedAnswer != null) {
       final agentMsg = Message(
         id: _uuid.v4(),
         conversationId: conversationId,
         sender: MessageSender.agent,
-        text: localDeviceInsight.answer,
+        text: groundedAnswer.answer,
         timestamp: DateTime.now(),
-        citations: citations,
+        citations: groundedAnswer.citations,
       );
       await _db.insertMessage(agentMsg);
       return agentMsg;

@@ -42,6 +42,8 @@ IconData _iconFor(String id) {
     'google_fit' => Icons.directions_run_outlined,
     'digital_wellbeing' => Icons.self_improvement_outlined,
     'samsung_email' => Icons.alternate_email,
+    'gemini' => Icons.auto_awesome,
+    'chatgpt' => Icons.smart_toy_outlined,
     _ => Icons.apps_outlined,
   };
 }

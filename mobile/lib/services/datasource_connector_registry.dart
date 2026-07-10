@@ -2,6 +2,7 @@ enum DatasourceConnectorMode {
   fileImport,
   notificationStream,
   nativeSmsImport,
+  nativeCallLogImport,
   healthConnect,
 }
 
@@ -65,12 +66,21 @@ const datasourceConnectorDefinitions = <DatasourceConnectorDefinition>[
   ),
   DatasourceConnectorDefinition(
     id: 'health_connect',
-    name: 'Health Connect Optional',
+    name: 'Health Connect',
     sourceId: 'health_connect',
     sourceConnector: 'HEALTH',
     mode: DatasourceConnectorMode.healthConnect,
-    description: 'Optional future source for supported health records.',
-    actionLabel: 'Connect',
+    description: 'Import user-approved steps and sleep records.',
+    actionLabel: 'Import Health',
+  ),
+  DatasourceConnectorDefinition(
+    id: 'call_logs',
+    name: 'Call Logs',
+    sourceId: 'call_logs',
+    sourceConnector: 'CALL_LOG',
+    mode: DatasourceConnectorMode.nativeCallLogImport,
+    description: 'Import missed, incoming and outgoing call metadata locally.',
+    actionLabel: 'Import Calls',
   ),
 ];
 

@@ -1,8 +1,11 @@
 package com.personalintelligence.pie.pie_mobile
 
+import android.app.role.RoleManager
+import android.content.ContentUris
 import android.Manifest
 import android.content.BroadcastReceiver
 import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
@@ -11,6 +14,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
+import android.provider.CallLog
 import android.provider.ContactsContract
 import android.provider.Telephony
 import android.speech.RecognitionListener
@@ -18,12 +22,29 @@ import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
 import androidx.core.content.FileProvider
+import androidx.health.connect.client.HealthConnectClient
+import androidx.health.connect.client.permission.HealthPermission
+import androidx.health.connect.client.records.SleepSessionRecord
+import androidx.health.connect.client.records.StepsRecord
+import androidx.health.connect.client.request.AggregateRequest
+import androidx.health.connect.client.request.ReadRecordsRequest
+import androidx.health.connect.client.time.TimeRangeFilter
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 import java.io.File
 import java.net.URLEncoder
+import java.time.Duration
+import java.time.Instant
+import java.time.LocalDate
+import java.time.ZoneId
 import java.util.Locale
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class MainActivity : FlutterActivity() {
     private val notificationChannelName = "pie_mobile/notifications"
@@ -41,6 +62,12 @@ class MainActivity : FlutterActivity() {
     private var textToSpeech: TextToSpeech? = null
     private var textToSpeechReady = false
     private var receiversRegistered = false
+    private val nativeScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    private val healthConnectPackage = "com.google.android.apps.healthdata"
+    private val healthPermissions = setOf(
+        HealthPermission.getReadPermission(StepsRecord::class),
+        HealthPermission.getReadPermission(SleepSessionRecord::class),
+    )
 
     private val notificationReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -282,6 +309,27 @@ class MainActivity : FlutterActivity() {
                     result.success(true)
                 }
 
+                "checkSmsManagementCapability" -> result.success(isDefaultSmsApp())
+
+                "requestDefaultSmsRole" -> {
+                    requestDefaultSmsRole()
+                    result.success(true)
+                }
+
+                "deleteSmsById" -> {
+                    val id = call.argument<String>("id") ?: ""
+                    result.success(deleteSmsById(id))
+                }
+
+                "checkCallLogPermission" -> result.success(
+                    hasPermission(Manifest.permission.READ_CALL_LOG),
+                )
+
+                "requestCallLogPermission" -> {
+                    requestRuntimePermission(Manifest.permission.READ_CALL_LOG, 1004)
+                    result.success(true)
+                }
+
                 "readRecentSms" -> {
                     if (!hasPermission(Manifest.permission.READ_SMS)) {
                         result.success(emptyList<Map<String, Any?>>())
@@ -291,11 +339,25 @@ class MainActivity : FlutterActivity() {
                     result.success(readRecentSms(limit))
                 }
 
+                "readRecentCalls" -> {
+                    if (!hasPermission(Manifest.permission.READ_CALL_LOG)) {
+                        result.success(emptyList<Map<String, Any?>>())
+                        return@setMethodCallHandler
+                    }
+                    val limit = call.argument<Int>("limit") ?: 500
+                    result.success(readRecentCalls(limit))
+                }
+
                 "checkHealthConnect" -> result.success(checkHealthConnect())
 
                 "openHealthConnect" -> {
                     openHealthConnect()
                     result.success(true)
+                }
+
+                "readHealthSummary" -> {
+                    val days = call.argument<Int>("days") ?: 30
+                    readHealthSummary(days, result)
                 }
 
                 else -> result.notImplemented()
@@ -307,6 +369,15 @@ class MainActivity : FlutterActivity() {
         channel.setMethodCallHandler { call, result ->
             when (call.method) {
                 "listSupportedApps" -> result.success(listSupportedApps())
+                "handoffPromptToAiApp" -> {
+                    val prompt = call.argument<String>("prompt")?.trim() ?: ""
+                    val preferredAppId = call.argument<String>("preferredAppId")
+                    if (prompt.isBlank()) {
+                        result.error("invalid_prompt", "Prompt is required.", null)
+                        return@setMethodCallHandler
+                    }
+                    result.success(handoffPromptToAiApp(prompt, preferredAppId))
+                }
                 else -> result.notImplemented()
             }
         }
@@ -739,9 +810,101 @@ class MainActivity : FlutterActivity() {
         return messages
     }
 
+    private fun isDefaultSmsApp(): Boolean {
+        return Telephony.Sms.getDefaultSmsPackage(this) == packageName
+    }
+
+    private fun requestDefaultSmsRole() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val roleManager = getSystemService(RoleManager::class.java)
+            if (roleManager != null && roleManager.isRoleAvailable(RoleManager.ROLE_SMS)) {
+                startActivity(roleManager.createRequestRoleIntent(RoleManager.ROLE_SMS))
+                return
+            }
+        }
+
+        val intent = Intent(Telephony.Sms.Intents.ACTION_CHANGE_DEFAULT).apply {
+            putExtra(Telephony.Sms.Intents.EXTRA_PACKAGE_NAME, packageName)
+        }
+        startActivity(intent)
+    }
+
+    private fun deleteSmsById(id: String): Map<String, String> {
+        if (!isDefaultSmsApp()) {
+            return mapOf(
+                "status" to "blocked",
+                "message" to "PIE must be the default SMS app before Android allows SMS deletion.",
+            )
+        }
+        val numericId = id.toLongOrNull()
+            ?: return mapOf("status" to "failed", "message" to "Invalid SMS id.")
+        val uri = ContentUris.withAppendedId(Telephony.Sms.CONTENT_URI, numericId)
+        val deleted = contentResolver.delete(uri, null, null)
+        return if (deleted > 0) {
+            mapOf("status" to "deleted", "message" to "SMS deleted.")
+        } else {
+            mapOf("status" to "failed", "message" to "SMS was not found or could not be deleted.")
+        }
+    }
+
+    private fun readRecentCalls(limit: Int): List<Map<String, Any?>> {
+        val safeLimit = limit.coerceIn(1, 2_000)
+        val projection = arrayOf(
+            CallLog.Calls._ID,
+            CallLog.Calls.NUMBER,
+            CallLog.Calls.CACHED_NAME,
+            CallLog.Calls.DATE,
+            CallLog.Calls.DURATION,
+            CallLog.Calls.TYPE,
+        )
+        val calls = mutableListOf<Map<String, Any?>>()
+        contentResolver.query(
+            CallLog.Calls.CONTENT_URI,
+            projection,
+            null,
+            null,
+            "${CallLog.Calls.DATE} DESC",
+        )?.use { cursor ->
+            val idIndex = cursor.getColumnIndexOrThrow(CallLog.Calls._ID)
+            val numberIndex = cursor.getColumnIndexOrThrow(CallLog.Calls.NUMBER)
+            val nameIndex = cursor.getColumnIndexOrThrow(CallLog.Calls.CACHED_NAME)
+            val dateIndex = cursor.getColumnIndexOrThrow(CallLog.Calls.DATE)
+            val durationIndex = cursor.getColumnIndexOrThrow(CallLog.Calls.DURATION)
+            val typeIndex = cursor.getColumnIndexOrThrow(CallLog.Calls.TYPE)
+
+            while (cursor.moveToNext() && calls.size < safeLimit) {
+                val type = cursor.getInt(typeIndex)
+                calls.add(
+                    mapOf(
+                        "id" to cursor.getString(idIndex),
+                        "number" to (cursor.getString(numberIndex) ?: ""),
+                        "name" to (cursor.getString(nameIndex) ?: ""),
+                        "date" to cursor.getLong(dateIndex),
+                        "durationSeconds" to cursor.getLong(durationIndex),
+                        "type" to type,
+                        "typeLabel" to callTypeLabel(type),
+                    ),
+                )
+            }
+        }
+        return calls
+    }
+
+    private fun callTypeLabel(type: Int): String {
+        return when (type) {
+            CallLog.Calls.INCOMING_TYPE -> "Incoming"
+            CallLog.Calls.OUTGOING_TYPE -> "Outgoing"
+            CallLog.Calls.MISSED_TYPE -> "Missed"
+            CallLog.Calls.REJECTED_TYPE -> "Rejected"
+            CallLog.Calls.BLOCKED_TYPE -> "Blocked"
+            CallLog.Calls.VOICEMAIL_TYPE -> "Voicemail"
+            else -> "Unknown"
+        }
+    }
+
     private fun checkHealthConnect(): Map<String, Any> {
-        val installed = isPackageInstalled("com.google.android.apps.healthdata")
-        return if (installed || Build.VERSION.SDK_INT >= 34) {
+        val status = HealthConnectClient.getSdkStatus(this, healthConnectPackage)
+        return if (status == HealthConnectClient.SDK_AVAILABLE) {
             mapOf(
                 "available" to true,
                 "message" to "Health Connect is available for user-approved health data.",
@@ -777,6 +940,121 @@ class MainActivity : FlutterActivity() {
             ),
         )
     }
+
+    private fun readHealthSummary(days: Int, result: MethodChannel.Result) {
+        nativeScope.launch {
+            try {
+                val rows = withContext(Dispatchers.IO) {
+                    readHealthSummaryInternal(days.coerceIn(1, 90))
+                }
+                result.success(rows)
+            } catch (error: SecurityException) {
+                result.error(
+                    "health_permission_denied",
+                    "Grant Steps and Sleep permissions in Health Connect, then import again.",
+                    null,
+                )
+            } catch (error: Exception) {
+                result.error(
+                    "health_read_failed",
+                    error.message ?: "Health Connect read failed.",
+                    null,
+                )
+            }
+        }
+    }
+
+    private suspend fun readHealthSummaryInternal(days: Int): List<Map<String, Any?>> {
+        if (HealthConnectClient.getSdkStatus(this, healthConnectPackage) !=
+            HealthConnectClient.SDK_AVAILABLE
+        ) {
+            throw IllegalStateException("Health Connect is not available.")
+        }
+
+        val client = HealthConnectClient.getOrCreate(this)
+        val granted = client.permissionController.getGrantedPermissions()
+        if (!granted.containsAll(healthPermissions)) {
+            throw SecurityException("Health Connect Steps/Sleep permissions are missing.")
+        }
+
+        val zone = ZoneId.systemDefault()
+        val today = LocalDate.now(zone)
+        val rows = mutableListOf<Map<String, Any?>>()
+
+        for (offset in (days - 1) downTo 0) {
+            val date = today.minusDays(offset.toLong())
+            val start = date.atStartOfDay(zone).toInstant()
+            val end = date.plusDays(1).atStartOfDay(zone).toInstant()
+            val steps = readStepsForRange(client, start, end)
+            val sleep = readSleepForRange(client, start, end)
+
+            rows.add(
+                mapOf(
+                    "date" to date.toString(),
+                    "startAt" to start.toEpochMilli(),
+                    "endAt" to end.toEpochMilli(),
+                    "steps" to steps,
+                    "sleepMinutes" to sleep.totalMinutes,
+                    "sleepStart" to (sleep.firstStart?.toString() ?: ""),
+                    "sleepEnd" to (sleep.lastEnd?.toString() ?: ""),
+                ),
+            )
+        }
+
+        return rows
+    }
+
+    private suspend fun readStepsForRange(
+        client: HealthConnectClient,
+        start: Instant,
+        end: Instant,
+    ): Long {
+        val aggregate = client.aggregate(
+            AggregateRequest(
+                metrics = setOf(StepsRecord.COUNT_TOTAL),
+                timeRangeFilter = TimeRangeFilter.between(start, end),
+            ),
+        )
+        return aggregate[StepsRecord.COUNT_TOTAL] ?: 0L
+    }
+
+    private suspend fun readSleepForRange(
+        client: HealthConnectClient,
+        start: Instant,
+        end: Instant,
+    ): SleepSummary {
+        val response = client.readRecords(
+            ReadRecordsRequest(
+                recordType = SleepSessionRecord::class,
+                timeRangeFilter = TimeRangeFilter.between(start, end),
+            ),
+        )
+        var totalMinutes = 0L
+        var firstStart: Instant? = null
+        var lastEnd: Instant? = null
+
+        for (record in response.records) {
+            val overlapStart = if (record.startTime.isAfter(start)) record.startTime else start
+            val overlapEnd = if (record.endTime.isBefore(end)) record.endTime else end
+            if (overlapEnd.isAfter(overlapStart)) {
+                totalMinutes += Duration.between(overlapStart, overlapEnd).toMinutes()
+            }
+            if (firstStart == null || record.startTime.isBefore(firstStart)) {
+                firstStart = record.startTime
+            }
+            if (lastEnd == null || record.endTime.isAfter(lastEnd)) {
+                lastEnd = record.endTime
+            }
+        }
+
+        return SleepSummary(totalMinutes, firstStart, lastEnd)
+    }
+
+    data class SleepSummary(
+        val totalMinutes: Long,
+        val firstStart: Instant?,
+        val lastEnd: Instant?,
+    )
 
     private fun listSupportedApps(): List<Map<String, Any>> {
         val knownApps = listOf(
@@ -828,6 +1106,18 @@ class MainActivity : FlutterActivity() {
                 packageName = "com.google.android.apps.wellbeing",
                 capability = "Usage and wellbeing controls require Android-supported permission surfaces.",
             ),
+            KnownApp(
+                id = "gemini",
+                name = "Gemini",
+                packageName = "com.google.android.apps.bard",
+                capability = "PIE can open Gemini with a prompt; results stay inside Gemini until you share or save them.",
+            ),
+            KnownApp(
+                id = "chatgpt",
+                name = "ChatGPT",
+                packageName = "com.openai.chatgpt",
+                capability = "PIE can open ChatGPT with a prompt; results stay inside ChatGPT until you share or save them.",
+            ),
         )
 
         return knownApps.map { app ->
@@ -840,6 +1130,97 @@ class MainActivity : FlutterActivity() {
                 "installed" to installed,
                 "capability" to app.capability,
                 "status" to if (installed) "Installed" else "Not installed",
+            )
+        }
+    }
+
+    private fun handoffPromptToAiApp(prompt: String, preferredAppId: String?): Map<String, Any> {
+        val aiApps = listOf(
+            KnownApp(
+                id = "gemini",
+                name = "Gemini",
+                packageName = "com.google.android.apps.bard",
+                capability = "",
+            ),
+            KnownApp(
+                id = "chatgpt",
+                name = "ChatGPT",
+                packageName = "com.openai.chatgpt",
+                capability = "",
+            ),
+        )
+        val orderedApps = if (preferredAppId.isNullOrBlank()) {
+            aiApps
+        } else {
+            aiApps.sortedBy { if (it.id == preferredAppId) 0 else 1 }
+        }
+        val app = orderedApps.firstOrNull { isPackageInstalled(it.packageName) }
+            ?: return mapOf(
+                "opened" to false,
+                "providerName" to "",
+                "packageName" to "",
+                "copiedToClipboard" to false,
+                "message" to "No supported AI app is installed. Install Gemini or ChatGPT, or configure a backend image provider.",
+            )
+
+        val sendIntent = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            setPackage(app.packageName)
+            putExtra(Intent.EXTRA_TEXT, prompt)
+            putExtra(Intent.EXTRA_SUBJECT, "PIE image prompt")
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+
+        return try {
+            if (sendIntent.resolveActivity(packageManager) != null) {
+                startActivity(sendIntent)
+                mapOf(
+                    "opened" to true,
+                    "providerName" to app.name,
+                    "packageName" to app.packageName,
+                    "copiedToClipboard" to false,
+                    "message" to "Opened ${app.name} with your prompt.",
+                )
+            } else {
+                openAiAppWithClipboardFallback(app, prompt)
+            }
+        } catch (_: Exception) {
+            openAiAppWithClipboardFallback(app, prompt)
+        }
+    }
+
+    private fun openAiAppWithClipboardFallback(app: KnownApp, prompt: String): Map<String, Any> {
+        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        clipboard.setPrimaryClip(ClipData.newPlainText("PIE prompt", prompt))
+        val launchIntent = packageManager.getLaunchIntentForPackage(app.packageName)?.apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        return if (launchIntent != null) {
+            try {
+                startActivity(launchIntent)
+                mapOf(
+                    "opened" to true,
+                    "providerName" to app.name,
+                    "packageName" to app.packageName,
+                    "copiedToClipboard" to true,
+                    "message" to "Opened ${app.name} and copied your prompt to the clipboard.",
+                )
+            } catch (_: Exception) {
+                mapOf(
+                    "opened" to false,
+                    "providerName" to app.name,
+                    "packageName" to app.packageName,
+                    "copiedToClipboard" to true,
+                    "message" to "${app.name} could not be opened. Your prompt was copied to the clipboard.",
+                )
+            }
+        } else {
+            mapOf(
+                "opened" to false,
+                "providerName" to app.name,
+                "packageName" to app.packageName,
+                "copiedToClipboard" to true,
+                "message" to "${app.name} is installed, but Android did not expose a launch target. Your prompt was copied to the clipboard.",
             )
         }
     }
@@ -958,6 +1339,7 @@ class MainActivity : FlutterActivity() {
         textToSpeech?.shutdown()
         textToSpeech = null
         unregisterAppReceivers()
+        nativeScope.cancel()
         super.onDestroy()
     }
 }

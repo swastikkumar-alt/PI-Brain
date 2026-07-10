@@ -40,9 +40,11 @@ class LocalQueryContextService {
     'GMAIL',
     'NOTIFICATION',
     'PAYMENT',
+    'ORDER',
     'CHAT',
     'PDF',
     'HEALTH',
+    'CALL_LOG',
   ];
 
   Future<LocalQueryContextResult> build(String userMessage) async {
@@ -123,7 +125,13 @@ class LocalQueryContextService {
       'delivery',
       'shipment',
     ])) {
-      sources.addAll(const ['SMS', 'GMAIL', 'NOTIFICATION', 'PAYMENT']);
+      sources.addAll(const [
+        'SMS',
+        'GMAIL',
+        'NOTIFICATION',
+        'PAYMENT',
+        'ORDER',
+      ]);
     }
 
     if (_hasAny(lower, const ['sms', 'message', 'messages', 'spam'])) {
@@ -144,6 +152,10 @@ class LocalQueryContextService {
 
     if (_hasAny(lower, const ['health', 'steps', 'sleep'])) {
       sources.add('HEALTH');
+    }
+
+    if (_hasAny(lower, const ['call', 'calls', 'missed', 'unanswered'])) {
+      sources.add('CALL_LOG');
     }
 
     if (sources.isEmpty && _promptPolicy.requiresLocalGrounding(query)) {

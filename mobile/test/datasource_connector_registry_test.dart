@@ -8,6 +8,7 @@ void main() {
     final whatsapp = datasourceConnectorById('whatsapp_context');
     final sms = datasourceConnectorById('sms_messages');
     final health = datasourceConnectorById('health_connect');
+    final calls = datasourceConnectorById('call_logs');
 
     expect(pdf.sourceId, 'files');
     expect(pdf.mode, DatasourceConnectorMode.fileImport);
@@ -23,5 +24,8 @@ void main() {
 
     expect(health.sourceId, 'health_connect');
     expect(health.mode, DatasourceConnectorMode.healthConnect);
+
+    expect(calls.sourceId, 'call_logs');
+    expect(calls.mode, DatasourceConnectorMode.nativeCallLogImport);
   });
 }

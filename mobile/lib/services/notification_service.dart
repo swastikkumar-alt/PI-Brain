@@ -87,6 +87,9 @@ class NotificationService {
       } else if (_looksLikePaymentNotification(title, text)) {
         sourceType = 'PAYMENT';
         datasourceId = 'notifications';
+      } else if (_looksLikeCommerceNotification(packageName, title, text)) {
+        sourceType = 'ORDER';
+        datasourceId = 'notifications';
       } else {
         return;
       }
@@ -156,5 +159,22 @@ class NotificationService {
       r'\b(?:otp|failed|declined|unsuccessful|pending|credited|refund|cashback|reversal)\b',
       caseSensitive: false,
     ).hasMatch(combined);
+  }
+
+  bool _looksLikeCommerceNotification(
+    String packageName,
+    String title,
+    String text,
+  ) {
+    final combined = '$packageName $title $text'.toLowerCase();
+    final hasCommerceApp = RegExp(
+      r'\b(amazon|flipkart|myntra|meesho|ajio|nykaa|swiggy|zomato|blinkit|zepto|bigbasket|delhivery|ekart|shiprocket|dtdc|xpressbees|shadowfax)\b',
+      caseSensitive: false,
+    ).hasMatch(combined);
+    final hasOrderSignal = RegExp(
+      r'\b(order|package|parcel|shipment|delivery|delivered|arriving|out for delivery|shipped|dispatched|packed|cancelled|canceled|return|refund|tracking)\b',
+      caseSensitive: false,
+    ).hasMatch(combined);
+    return hasCommerceApp && hasOrderSignal;
   }
 }

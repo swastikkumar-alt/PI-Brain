@@ -44,6 +44,7 @@ dependencies:
   syncfusion_flutter_pdf: ^26.2.9
   sqflite_sqlcipher: ^3.4.0
   cryptography: ^2.9.0
+  workmanager: ^0.9.0+3
 
 dev_dependencies:
   flutter_test:

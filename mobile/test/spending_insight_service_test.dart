@@ -1,5 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pie_mobile/models/entity.dart';
+import 'package:pie_mobile/models/financial_transaction.dart';
+import 'package:pie_mobile/services/database_service.dart';
 import 'package:pie_mobile/services/spending_insight_service.dart';
 
 void main() {
@@ -212,6 +214,61 @@ void main() {
       expect(result.answer, contains('**Total spent: ₹150**'));
     });
 
+    test('deduplicates large same-day transaction evidence without reference', () {
+      final range = service.resolveRange(
+        'how much did I spend on 8 july',
+        now: DateTime(2026, 7, 10, 16, 30),
+      );
+      final result = service.buildResult(
+        query: 'how much did I spend on 8 july',
+        range: range,
+        entities: [
+          _entity(
+            id: 'sms_large',
+            content:
+                'Received SMS\nFrom/To: BANK\nDate: ${DateTime(2026, 7, 8, 11).millisecondsSinceEpoch}\n\n'
+                'A/c XX123 debited by Rs 400000 at PROPERTY PAYMENT.',
+            timestamp: DateTime(2026, 7, 8, 11).millisecondsSinceEpoch,
+          ),
+          _entity(
+            id: 'notif_large',
+            source: 'PAYMENT',
+            content:
+                'Notification from Bank: Payment of INR 400000 paid to PROPERTY PAYMENT.',
+            timestamp: DateTime(2026, 7, 8, 11, 4).millisecondsSinceEpoch,
+          ),
+        ],
+      );
+
+      expect(result.transactions, hasLength(1));
+      expect(result.answer, contains('4,00,000'));
+    });
+
+    test('adds month projection for month-to-date spending', () {
+      final range = service.resolveRange(
+        'what is my spending projection this month till date',
+        now: DateTime(2026, 7, 10, 16, 30),
+      );
+      final result = service.buildResult(
+        query: 'what is my spending projection this month till date',
+        range: range,
+        entities: [
+          _entity(
+            id: 'month_project_1',
+            content: 'A/c debited by Rs 1000 at STORE.',
+            timestamp: DateTime(2026, 7, 1, 12).millisecondsSinceEpoch,
+          ),
+          _entity(
+            id: 'month_project_2',
+            content: 'You paid INR 2000 to CAFE.',
+            timestamp: DateTime(2026, 7, 10, 9).millisecondsSinceEpoch,
+          ),
+        ],
+      );
+
+      expect(result.answer, contains('Projected full-month spend'));
+    });
+
     test('reports missing synced transaction data clearly', () {
       final range = service.resolveRange('spend yesterday', now: now);
       final result = service.buildResult(
@@ -226,6 +283,38 @@ void main() {
         contains('no SMS, Gmail, or payment notification data'),
       );
       expect(result.answer, contains('8 Jul 2026'));
+    });
+
+    test('answerIfSupported calculates requested date from ledger rows', () async {
+      final database = _LedgerBackedFakeDatabase([
+        _entity(
+          id: 'sms_ledger_1',
+          content:
+              'Received SMS\nFrom/To: BANK\nDate: ${DateTime(2026, 7, 8, 10).millisecondsSinceEpoch}\n\n'
+              'A/c XX123 debited by Rs 120 at AMAZON. UPI Ref 123456789012.',
+          timestamp: DateTime(2026, 7, 8, 10).millisecondsSinceEpoch,
+        ),
+        _entity(
+          id: 'sms_ledger_2',
+          content:
+              'Received SMS\nFrom/To: BANK\nDate: ${DateTime(2026, 7, 8, 11).millisecondsSinceEpoch}\n\n'
+              'Available balance is Rs 90000.',
+          timestamp: DateTime(2026, 7, 8, 11).millisecondsSinceEpoch,
+        ),
+      ]);
+      final ledgerService = SpendingInsightService(
+        database: database,
+        nowProvider: () => DateTime(2026, 7, 10, 16, 30),
+      );
+
+      final result = await ledgerService.answerIfSupported(
+        'how much did I spend on 8th July',
+      );
+
+      expect(result, isNotNull);
+      expect(result!.transactions, hasLength(1));
+      expect(result.answer, contains('**Total spent: \u20B9120**'));
+      expect(database.ledgerRows, hasLength(1));
     });
   });
 }
@@ -246,4 +335,78 @@ Entity _entity({
     createdAt: entityTimestamp,
     updatedAt: entityTimestamp,
   );
+}
+
+class _LedgerBackedFakeDatabase implements DatabaseService {
+  _LedgerBackedFakeDatabase(this.entities);
+
+  final List<Entity> entities;
+  final Map<String, FinancialTransaction> transactions = {};
+  final Map<String, String> evidenceByTransaction = {};
+
+  List<Map<String, dynamic>> get ledgerRows {
+    return transactions.values.map((transaction) {
+      final entityId = evidenceByTransaction[transaction.id] ?? '';
+      final entity = entities.firstWhere(
+        (candidate) => candidate.id == entityId,
+        orElse: () => Entity(
+          id: entityId,
+          entityType: 'message',
+          sourceConnector: transaction.sourceConnector,
+          content: '',
+          createdAt: transaction.occurredAt,
+          updatedAt: transaction.occurredAt,
+        ),
+      );
+      return {
+        ...transaction.toJson(),
+        'entity_id': entityId,
+        'evidence_content': entity.content,
+      };
+    }).toList();
+  }
+
+  @override
+  Future<List<Entity>> getEntitiesCreatedBetween({
+    required int startAt,
+    required int endAt,
+    List<String> sourceConnectors = const [],
+  }) async {
+    return entities.where((entity) {
+      final sourceAllowed =
+          sourceConnectors.isEmpty ||
+          sourceConnectors.contains(entity.sourceConnector);
+      return sourceAllowed &&
+          entity.createdAt >= startAt &&
+          entity.createdAt < endAt;
+    }).toList();
+  }
+
+  @override
+  Future<void> upsertFinancialTransaction({
+    required FinancialTransaction transaction,
+    required String evidenceEntityId,
+    required double confidence,
+  }) async {
+    transactions[transaction.id] = transaction;
+    evidenceByTransaction[transaction.id] = evidenceEntityId;
+  }
+
+  @override
+  Future<List<Map<String, dynamic>>>
+  getFinancialTransactionsWithEvidenceBetween({
+    required int startAt,
+    required int endAt,
+    String direction = 'debit',
+  }) async {
+    return ledgerRows.where((row) {
+      final occurredAt = (row['occurred_at'] as num).toInt();
+      return row['direction'] == direction &&
+          occurredAt >= startAt &&
+          occurredAt < endAt;
+    }).toList();
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }

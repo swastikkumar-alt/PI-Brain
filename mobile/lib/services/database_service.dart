@@ -11,6 +11,7 @@ import 'package:sqflite/sqflite.dart' as legacy_sqflite;
 import 'package:sqflite_sqlcipher/sqflite.dart';
 import '../models/entity.dart';
 import '../models/edge.dart';
+import '../models/financial_transaction.dart';
 import '../models/memory.dart';
 import '../models/sync_event.dart';
 import '../models/message.dart';
@@ -116,7 +117,7 @@ class DatabaseService {
   Future<Database> _openEncryptedDatabase(String path, String password) {
     return openDatabase(
       path,
-      version: 7,
+      version: 9,
       onConfigure: (db) async {
         await db.execute('PRAGMA foreign_keys = ON');
         await db.rawQuery('PRAGMA journal_mode = WAL');
@@ -182,6 +183,12 @@ class DatabaseService {
         await _copyTableIfPresent(sourceDb, txn, 'sync_events');
         await _copyTableIfPresent(sourceDb, txn, 'messages');
         await _copyTableIfPresent(sourceDb, txn, 'citations');
+        await _copyTableIfPresent(sourceDb, txn, 'financial_transactions');
+        await _copyTableIfPresent(
+          sourceDb,
+          txn,
+          'financial_transaction_evidence',
+        );
         await _rebuildFtsFromEntities(txn);
       });
     } catch (error, stackTrace) {
@@ -339,6 +346,8 @@ class DatabaseService {
 
     await _createIndexes(db);
     await _createActionTables(db);
+    await _createGroundedIntelligenceTables(db);
+    await _createLocalDataFreshnessTables(db);
   }
 
   Future<void> _upgradeDB(Database db, int oldVersion, int newVersion) async {
@@ -353,6 +362,12 @@ class DatabaseService {
     }
     if (oldVersion < 5) {
       await _createDedupeColumnsAndIndexes(db);
+    }
+    if (oldVersion < 8) {
+      await _createGroundedIntelligenceTables(db);
+    }
+    if (oldVersion < 9) {
+      await _createLocalDataFreshnessTables(db);
     }
   }
 
@@ -381,6 +396,65 @@ class DatabaseService {
     );
     await db.execute(
       'CREATE INDEX IF NOT EXISTS idx_citations_message ON citations(message_id)',
+    );
+  }
+
+  Future<void> _createGroundedIntelligenceTables(Database db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS financial_transactions (
+        id TEXT PRIMARY KEY,
+        canonical_key TEXT NOT NULL UNIQUE,
+        direction TEXT NOT NULL,
+        amount_minor INTEGER NOT NULL,
+        currency TEXT NOT NULL,
+        occurred_at INTEGER NOT NULL,
+        source_connector TEXT NOT NULL,
+        merchant TEXT,
+        reference TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      )
+    ''');
+
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS financial_transaction_evidence (
+        transaction_id TEXT NOT NULL REFERENCES financial_transactions(id) ON DELETE CASCADE,
+        entity_id TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+        source_connector TEXT NOT NULL,
+        confidence REAL NOT NULL DEFAULT 1.0,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY(transaction_id, entity_id)
+      )
+    ''');
+
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_financial_transactions_time ON financial_transactions(occurred_at DESC)',
+    );
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_financial_transactions_direction ON financial_transactions(direction, occurred_at DESC)',
+    );
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_financial_evidence_entity ON financial_transaction_evidence(entity_id)',
+    );
+  }
+
+  Future<void> _createLocalDataFreshnessTables(Database db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS datasource_sync_state (
+        source_id TEXT PRIMARY KEY,
+        last_started_at INTEGER,
+        last_success_at INTEGER,
+        last_native_cursor TEXT,
+        total_read INTEGER NOT NULL DEFAULT 0,
+        imported INTEGER NOT NULL DEFAULT 0,
+        skipped_duplicates INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT,
+        next_scheduled_at INTEGER,
+        updated_at INTEGER NOT NULL
+      )
+    ''');
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_datasource_sync_state_success ON datasource_sync_state(last_success_at DESC)',
     );
   }
 
@@ -560,7 +634,7 @@ class DatabaseService {
       'contacts_metadata': 'Contacts Metadata',
       'sms_messages': 'SMS Messages',
       'health_connect': 'Health Connect',
-      'sms_calls_future': 'Call Logs',
+      'call_logs': 'Call Logs',
     };
 
     for (final entry in defaults.entries) {
@@ -791,6 +865,125 @@ class DatabaseService {
       await txn.delete('entities', where: 'id = ?', whereArgs: [id]);
       await txn.delete('entities_fts', where: 'entity_id = ?', whereArgs: [id]);
     });
+  }
+
+  Future<Entity?> getEntityById(String id) async {
+    final db = await instance.database;
+    final rows = await db.query(
+      'entities',
+      where: 'id = ?',
+      whereArgs: [id],
+      limit: 1,
+    );
+    return rows.isEmpty ? null : Entity.fromJson(rows.single);
+  }
+
+  Future<List<Entity>> getEntitiesByIds(List<String> ids) async {
+    if (ids.isEmpty) return const [];
+    final db = await instance.database;
+    final placeholders = List.filled(ids.length, '?').join(',');
+    final rows = await db.query(
+      'entities',
+      where: 'id IN ($placeholders)',
+      whereArgs: ids,
+    );
+    final byId = {
+      for (final row in rows) row['id']?.toString() ?? '': Entity.fromJson(row),
+    };
+    return [
+      for (final id in ids)
+        if (byId[id] != null) byId[id]!,
+    ];
+  }
+
+  Future<void> upsertFinancialTransaction({
+    required FinancialTransaction transaction,
+    required String evidenceEntityId,
+    required double confidence,
+  }) async {
+    final db = await instance.database;
+    await db.transaction((txn) async {
+      await txn.insert(
+        'financial_transactions',
+        transaction.toJson(),
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+      await txn.insert(
+        'financial_transaction_evidence',
+        {
+          'transaction_id': transaction.id,
+          'entity_id': evidenceEntityId,
+          'source_connector': transaction.sourceConnector,
+          'confidence': confidence,
+          'created_at': DateTime.now().millisecondsSinceEpoch,
+        },
+        conflictAlgorithm: ConflictAlgorithm.ignore,
+      );
+    });
+  }
+
+  Future<List<FinancialTransaction>> getFinancialTransactionsBetween({
+    required int startAt,
+    required int endAt,
+    String direction = 'debit',
+  }) async {
+    final db = await instance.database;
+    final rows = await db.query(
+      'financial_transactions',
+      where: 'occurred_at >= ? AND occurred_at < ? AND direction = ?',
+      whereArgs: [startAt, endAt, direction],
+      orderBy: 'occurred_at ASC',
+    );
+    return rows.map(FinancialTransaction.fromJson).toList();
+  }
+
+  Future<List<Map<String, dynamic>>>
+  getFinancialTransactionsWithEvidenceBetween({
+    required int startAt,
+    required int endAt,
+    String direction = 'debit',
+  }) async {
+    final db = await instance.database;
+    final transactions = await db.query(
+      'financial_transactions',
+      where: 'occurred_at >= ? AND occurred_at < ? AND direction = ?',
+      whereArgs: [startAt, endAt, direction],
+      orderBy: 'occurred_at ASC',
+    );
+    final rows = <Map<String, dynamic>>[];
+    for (final transaction in transactions) {
+      final evidenceRows = await db.rawQuery(
+        '''
+        SELECT fte.entity_id, e.content AS evidence_content, e.entity_type, e.source_connector AS evidence_source
+        FROM financial_transaction_evidence fte
+        LEFT JOIN entities e ON e.id = fte.entity_id
+        WHERE fte.transaction_id = ?
+        ORDER BY fte.confidence DESC, fte.created_at ASC
+        LIMIT 1
+        ''',
+        [transaction['id']],
+      );
+      rows.add({
+        ...transaction,
+        if (evidenceRows.isNotEmpty) ...evidenceRows.first,
+      });
+    }
+    return rows;
+  }
+
+  Future<List<String>> getFinancialTransactionEvidenceIds(String id) async {
+    final db = await instance.database;
+    final rows = await db.query(
+      'financial_transaction_evidence',
+      columns: ['entity_id'],
+      where: 'transaction_id = ?',
+      whereArgs: [id],
+      orderBy: 'confidence DESC, created_at ASC',
+    );
+    return rows
+        .map((row) => row['entity_id']?.toString() ?? '')
+        .where((id) => id.isNotEmpty)
+        .toList();
   }
 
   Future<EntityDedupeResult> deduplicateEntities() async {
@@ -1379,6 +1572,111 @@ class DatabaseService {
     );
     if (rows.isEmpty) return false;
     return rows.single['is_enabled'] == 1;
+  }
+
+  Future<Map<String, dynamic>?> getDatasourceSyncState(String sourceId) async {
+    final db = await instance.database;
+    final rows = await db.query(
+      'datasource_sync_state',
+      where: 'source_id = ?',
+      whereArgs: [sourceId],
+      limit: 1,
+    );
+    return rows.isEmpty ? null : rows.single;
+  }
+
+  Future<List<Map<String, dynamic>>> getDatasourceSyncStates() async {
+    final db = await instance.database;
+    return db.query('datasource_sync_state', orderBy: 'source_id ASC');
+  }
+
+  Future<void> markDatasourceSyncStarted({
+    required String sourceId,
+    required int startedAt,
+    int? nextScheduledAt,
+  }) async {
+    final db = await instance.database;
+    await db.insert('datasource_sync_state', {
+      'source_id': sourceId,
+      'last_started_at': startedAt,
+      'next_scheduled_at': nextScheduledAt,
+      'updated_at': startedAt,
+    }, conflictAlgorithm: ConflictAlgorithm.ignore);
+    await db.update(
+      'datasource_sync_state',
+      {
+        'last_started_at': startedAt,
+        'next_scheduled_at': ?nextScheduledAt,
+        'updated_at': startedAt,
+      },
+      where: 'source_id = ?',
+      whereArgs: [sourceId],
+    );
+  }
+
+  Future<void> markDatasourceSyncSuccess({
+    required String sourceId,
+    required int finishedAt,
+    required int totalRead,
+    required int imported,
+    required int skippedDuplicates,
+    String? nativeCursor,
+    int? nextScheduledAt,
+  }) async {
+    final db = await instance.database;
+    await db.insert('datasource_sync_state', {
+      'source_id': sourceId,
+      'last_started_at': finishedAt,
+      'last_success_at': finishedAt,
+      'last_native_cursor': nativeCursor,
+      'total_read': totalRead,
+      'imported': imported,
+      'skipped_duplicates': skippedDuplicates,
+      'last_error': null,
+      'next_scheduled_at': nextScheduledAt,
+      'updated_at': finishedAt,
+    }, conflictAlgorithm: ConflictAlgorithm.ignore);
+    await db.update(
+      'datasource_sync_state',
+      {
+        'last_success_at': finishedAt,
+        'last_native_cursor': nativeCursor,
+        'total_read': totalRead,
+        'imported': imported,
+        'skipped_duplicates': skippedDuplicates,
+        'last_error': null,
+        'next_scheduled_at': ?nextScheduledAt,
+        'updated_at': finishedAt,
+      },
+      where: 'source_id = ?',
+      whereArgs: [sourceId],
+    );
+  }
+
+  Future<void> markDatasourceSyncFailure({
+    required String sourceId,
+    required int finishedAt,
+    required String error,
+    int? nextScheduledAt,
+  }) async {
+    final db = await instance.database;
+    await db.insert('datasource_sync_state', {
+      'source_id': sourceId,
+      'last_started_at': finishedAt,
+      'last_error': error,
+      'next_scheduled_at': nextScheduledAt,
+      'updated_at': finishedAt,
+    }, conflictAlgorithm: ConflictAlgorithm.ignore);
+    await db.update(
+      'datasource_sync_state',
+      {
+        'last_error': error,
+        'next_scheduled_at': ?nextScheduledAt,
+        'updated_at': finishedAt,
+      },
+      where: 'source_id = ?',
+      whereArgs: [sourceId],
+    );
   }
 
   Future<AppUnlockPolicy> getAppUnlockPolicy() async {

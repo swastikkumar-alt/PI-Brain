@@ -1,16 +1,68 @@
+import 'dart:developer' as developer;
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:workmanager/workmanager.dart';
 import 'views/dashboard_view.dart';
 import 'views/intro_view.dart';
+import 'services/database_service.dart';
 import 'services/onboarding_service.dart';
 import 'services/notification_service.dart';
 import 'services/theme_mode_service.dart';
+import 'services/local_data_freshness_service.dart';
+import 'services/spending_insight_service.dart';
+
+const _localDataSyncTask = 'pie.local_data_sync';
+const _localDataSyncUniqueName = 'pie.local_data_sync.periodic';
+
+@pragma('vm:entry-point')
+void pieLocalDataSyncCallbackDispatcher() {
+  Workmanager().executeTask((task, inputData) async {
+    WidgetsFlutterBinding.ensureInitialized();
+    try {
+      await SpendingInsightService().backfillLedger();
+      await DatabaseService.instance.repairSearchIndex();
+      return true;
+    } catch (error, stackTrace) {
+      developer.log(
+        'Background local data maintenance failed.',
+        name: 'PIEBackgroundSync',
+        error: error,
+        stackTrace: stackTrace,
+      );
+      return false;
+    }
+  });
+}
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await _initializeBackgroundSync();
   await ThemeModeService.instance.load();
   NotificationService.instance.initialize();
   runApp(const ProviderScope(child: MyApp()));
+}
+
+Future<void> _initializeBackgroundSync() async {
+  if (!Platform.isAndroid) return;
+  try {
+    await Workmanager().initialize(pieLocalDataSyncCallbackDispatcher);
+    await Workmanager().registerPeriodicTask(
+      _localDataSyncUniqueName,
+      _localDataSyncTask,
+      frequency: const Duration(hours: 4),
+      existingWorkPolicy: ExistingPeriodicWorkPolicy.update,
+      constraints: Constraints(networkType: NetworkType.notRequired),
+    );
+  } catch (error, stackTrace) {
+    developer.log(
+      'Failed to register background local data maintenance.',
+      name: 'PIEBackgroundSync',
+      error: error,
+      stackTrace: stackTrace,
+    );
+  }
 }
 
 class MyApp extends StatefulWidget {
@@ -20,14 +72,35 @@ class MyApp extends StatefulWidget {
   State<MyApp> createState() => _MyAppState();
 }
 
-class _MyAppState extends State<MyApp> {
+class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
   bool _checkingIntro = true;
   bool _showIntro = false;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    LocalDataFreshnessService.instance.startForegroundScheduler();
+    LocalDataFreshnessService.instance.refreshAllEnabledIfStale(
+      reason: 'app_start',
+    );
     _loadIntroState();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    LocalDataFreshnessService.instance.stopForegroundScheduler();
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      LocalDataFreshnessService.instance.refreshAllEnabledIfStale(
+        reason: 'app_resume',
+      );
+    }
   }
 
   Future<void> _loadIntroState() async {

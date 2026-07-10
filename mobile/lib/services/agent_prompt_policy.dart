@@ -101,6 +101,14 @@ class AgentPromptPolicy {
       'local memory',
       'local files',
       'local links',
+      'missed calls',
+      'unanswered calls',
+      'important emails',
+      'how many messages',
+      'steps every day',
+      'sleep better',
+      'when was i asleep',
+      'at what time was i asleep',
       'synced files',
     ];
 

@@ -5,18 +5,30 @@ import 'package:flutter/services.dart';
 import '../models/entity.dart';
 import 'database_service.dart';
 
-class SmsImportResult {
+class SmsImportResult extends NativeImportResult {
   const SmsImportResult({
+    required super.imported,
+    required super.skippedDuplicates,
+    required super.totalRead,
+    super.blockedReason,
+    super.nativeCursor,
+  });
+}
+
+class NativeImportResult {
+  const NativeImportResult({
     required this.imported,
     required this.skippedDuplicates,
     required this.totalRead,
     this.blockedReason,
+    this.nativeCursor,
   });
 
   final int imported;
   final int skippedDuplicates;
   final int totalRead;
   final String? blockedReason;
+  final String? nativeCursor;
 
   bool get isBlocked => blockedReason != null && blockedReason!.isNotEmpty;
 }
@@ -65,7 +77,83 @@ class NativeDatasourceService {
     }
   }
 
-  Future<SmsImportResult> importRecentSms({int limit = 500}) async {
+  Future<bool> checkSmsManagementCapability() async {
+    try {
+      return await _channel.invokeMethod<bool>(
+            'checkSmsManagementCapability',
+          ) ??
+          false;
+    } catch (error, stackTrace) {
+      developer.log(
+        'Failed to check SMS management capability.',
+        name: 'NativeDatasourceService',
+        error: error,
+        stackTrace: stackTrace,
+      );
+      return false;
+    }
+  }
+
+  Future<void> requestDefaultSmsRole() async {
+    try {
+      await _channel.invokeMethod('requestDefaultSmsRole');
+    } catch (error, stackTrace) {
+      developer.log(
+        'Failed to request default SMS role.',
+        name: 'NativeDatasourceService',
+        error: error,
+        stackTrace: stackTrace,
+      );
+    }
+  }
+
+  Future<Map<String, String>> deleteSmsByNativeId(String smsId) async {
+    try {
+      final result = await _channel.invokeMethod<Map<dynamic, dynamic>>(
+        'deleteSmsById',
+        {'id': smsId},
+      );
+      return {
+        'status': result?['status']?.toString() ?? 'failed',
+        'message': result?['message']?.toString() ?? 'SMS delete failed.',
+      };
+    } catch (error) {
+      return {'status': 'failed', 'message': 'SMS delete failed: $error'};
+    }
+  }
+
+  Future<bool> checkCallLogPermission() async {
+    try {
+      return await _channel.invokeMethod<bool>('checkCallLogPermission') ??
+          false;
+    } catch (error, stackTrace) {
+      developer.log(
+        'Failed to check call-log permission.',
+        name: 'NativeDatasourceService',
+        error: error,
+        stackTrace: stackTrace,
+      );
+      return false;
+    }
+  }
+
+  Future<void> requestCallLogPermission() async {
+    try {
+      await _channel.invokeMethod('requestCallLogPermission');
+    } catch (error, stackTrace) {
+      developer.log(
+        'Failed to request call-log permission.',
+        name: 'NativeDatasourceService',
+        error: error,
+        stackTrace: stackTrace,
+      );
+    }
+  }
+
+  Future<SmsImportResult> importRecentSms({
+    int limit = 500,
+    bool queueSync = false,
+  }) async {
     if (!await checkSmsPermission()) {
       await requestSmsPermission();
       return const SmsImportResult(
@@ -84,6 +172,7 @@ class NativeDatasourceService {
           const [];
       var imported = 0;
       var skipped = 0;
+      var newestDate = 0;
 
       for (final item in rawMessages) {
         final message = Map<String, dynamic>.from(item as Map);
@@ -91,17 +180,19 @@ class NativeDatasourceService {
         if (content.trim().isEmpty) continue;
 
         final now = DateTime.now().millisecondsSinceEpoch;
+        final messageDate = (message['date'] as num?)?.toInt() ?? now;
+        if (messageDate > newestDate) newestDate = messageDate;
         final entity = Entity(
           id: 'sms_${message['id'] ?? now}',
           entityType: 'message',
           sourceConnector: 'SMS',
           content: content,
-          createdAt: (message['date'] as num?)?.toInt() ?? now,
+          createdAt: messageDate,
           updatedAt: now,
         );
         final inserted = await DatabaseService.instance.insertEntity(
           entity,
-          queueSync: true,
+          queueSync: queueSync,
         );
         if (inserted) {
           imported += 1;
@@ -114,6 +205,7 @@ class NativeDatasourceService {
         imported: imported,
         skippedDuplicates: skipped,
         totalRead: rawMessages.length,
+        nativeCursor: newestDate == 0 ? null : newestDate.toString(),
       );
     } catch (error, stackTrace) {
       developer.log(
@@ -127,6 +219,79 @@ class NativeDatasourceService {
         skippedDuplicates: 0,
         totalRead: 0,
         blockedReason: 'SMS import failed: $error',
+      );
+    }
+  }
+
+  Future<NativeImportResult> importRecentCalls({
+    int limit = 500,
+    bool queueSync = false,
+  }) async {
+    if (!await checkCallLogPermission()) {
+      await requestCallLogPermission();
+      return const NativeImportResult(
+        imported: 0,
+        skippedDuplicates: 0,
+        totalRead: 0,
+        blockedReason: 'Grant Call Log permission, then run import again.',
+      );
+    }
+
+    try {
+      final rawCalls =
+          await _channel.invokeMethod<List<dynamic>>('readRecentCalls', {
+            'limit': limit,
+          }) ??
+          const [];
+      var imported = 0;
+      var skipped = 0;
+      var newestDate = 0;
+
+      for (final item in rawCalls) {
+        final call = Map<String, dynamic>.from(item as Map);
+        final content = _callLogContent(call);
+        if (content.trim().isEmpty) continue;
+
+        final now = DateTime.now().millisecondsSinceEpoch;
+        final callDate = (call['date'] as num?)?.toInt() ?? now;
+        if (callDate > newestDate) newestDate = callDate;
+        final entity = Entity(
+          id: 'call_${call['id'] ?? now}',
+          entityType: 'call_log',
+          sourceConnector: 'CALL_LOG',
+          content: content,
+          createdAt: callDate,
+          updatedAt: now,
+        );
+        final inserted = await DatabaseService.instance.insertEntity(
+          entity,
+          queueSync: queueSync,
+        );
+        if (inserted) {
+          imported += 1;
+        } else {
+          skipped += 1;
+        }
+      }
+
+      return NativeImportResult(
+        imported: imported,
+        skippedDuplicates: skipped,
+        totalRead: rawCalls.length,
+        nativeCursor: newestDate == 0 ? null : newestDate.toString(),
+      );
+    } catch (error, stackTrace) {
+      developer.log(
+        'Failed to import call logs.',
+        name: 'NativeDatasourceService',
+        error: error,
+        stackTrace: stackTrace,
+      );
+      return NativeImportResult(
+        imported: 0,
+        skippedDuplicates: 0,
+        totalRead: 0,
+        blockedReason: 'Call log import failed: $error',
       );
     }
   }
@@ -169,11 +334,97 @@ class NativeDatasourceService {
     }
   }
 
+  Future<NativeImportResult> importHealthSummary({
+    int days = 30,
+    bool queueSync = false,
+  }) async {
+    try {
+      final rawRows =
+          await _channel.invokeMethod<List<dynamic>>('readHealthSummary', {
+            'days': days,
+          }) ??
+          const [];
+      var imported = 0;
+      var skipped = 0;
+
+      for (final item in rawRows) {
+        final row = Map<String, dynamic>.from(item as Map);
+        final content = _healthContent(row);
+        if (content.trim().isEmpty) continue;
+
+        final now = DateTime.now().millisecondsSinceEpoch;
+        final entity = Entity(
+          id: 'health_${row['date'] ?? now}',
+          entityType: 'health_summary',
+          sourceConnector: 'HEALTH',
+          content: content,
+          createdAt: (row['startAt'] as num?)?.toInt() ?? now,
+          updatedAt: now,
+        );
+        final inserted = await DatabaseService.instance.insertEntity(
+          entity,
+          queueSync: queueSync,
+        );
+        if (inserted) {
+          imported += 1;
+        } else {
+          skipped += 1;
+        }
+      }
+
+      return NativeImportResult(
+        imported: imported,
+        skippedDuplicates: skipped,
+        totalRead: rawRows.length,
+        nativeCursor: rawRows.isEmpty ? null : rawRows.length.toString(),
+      );
+    } on PlatformException catch (error) {
+      return NativeImportResult(
+        imported: 0,
+        skippedDuplicates: 0,
+        totalRead: 0,
+        blockedReason: error.message ?? 'Health Connect import is blocked.',
+      );
+    } catch (error, stackTrace) {
+      developer.log(
+        'Failed to import Health Connect records.',
+        name: 'NativeDatasourceService',
+        error: error,
+        stackTrace: stackTrace,
+      );
+      return NativeImportResult(
+        imported: 0,
+        skippedDuplicates: 0,
+        totalRead: 0,
+        blockedReason: 'Health Connect import failed: $error',
+      );
+    }
+  }
+
   String _smsContent(Map<String, dynamic> sms) {
     final direction = sms['type']?.toString() == '2' ? 'Sent' : 'Received';
     final address = sms['address']?.toString().trim() ?? 'Unknown';
     final body = sms['body']?.toString().trim() ?? '';
     final date = sms['date']?.toString() ?? '';
     return '$direction SMS\nFrom/To: $address\nDate: $date\n\n$body';
+  }
+
+  String _callLogContent(Map<String, dynamic> call) {
+    final number = call['number']?.toString().trim() ?? 'Unknown';
+    final name = call['name']?.toString().trim() ?? '';
+    final type = call['typeLabel']?.toString().trim() ?? 'Unknown';
+    final date = call['date']?.toString() ?? '';
+    final duration = call['durationSeconds']?.toString() ?? '0';
+    final cachedName = name.isEmpty ? '' : '\nName: $name';
+    return 'Call Log\nType: $type\nNumber: $number$cachedName\nDate: $date\nDuration seconds: $duration';
+  }
+
+  String _healthContent(Map<String, dynamic> row) {
+    final date = row['date']?.toString() ?? '';
+    final steps = row['steps']?.toString() ?? '0';
+    final sleepMinutes = row['sleepMinutes']?.toString() ?? '0';
+    final sleepStart = row['sleepStart']?.toString() ?? '';
+    final sleepEnd = row['sleepEnd']?.toString() ?? '';
+    return 'Health Summary\nDate: $date\nSteps: $steps\nSleep minutes: $sleepMinutes\nSleep start: $sleepStart\nSleep end: $sleepEnd';
   }
 }

@@ -8,6 +8,7 @@ import '../services/app_discovery_service.dart';
 import '../services/database_service.dart';
 import '../services/email_connector_service.dart';
 import '../services/gateway_settings_service.dart';
+import '../services/local_qa_report_service.dart';
 import '../services/native_contact_service.dart';
 import '../services/native_datasource_service.dart';
 import '../services/notification_service.dart';
@@ -48,6 +49,7 @@ class _SettingsViewState extends State<SettingsView> {
   final _themeModeService = ThemeModeService.instance;
   final _appDiscovery = AppDiscoveryService.instance;
   final _gatewaySettings = GatewaySettingsService.instance;
+  final _qaReportService = LocalQaReportService();
 
   bool _loading = true;
   bool _micAllowed = false;
@@ -57,6 +59,7 @@ class _SettingsViewState extends State<SettingsView> {
   bool _smsAllowed = false;
   bool _whatsAppAvailable = false;
   bool _emailAvailable = false;
+  bool _qaRunning = false;
   List<DetectedApp> _detectedApps = const [];
   GatewayRuntimeSettings _backendSettings = const GatewayRuntimeSettings(
     gatewayUrl: '',
@@ -112,6 +115,23 @@ class _SettingsViewState extends State<SettingsView> {
     await _db.setAppUnlockPolicy(policy);
     if (!mounted) return;
     setState(() => _unlockPolicy = policy);
+  }
+
+  Future<void> _runLocalQaReport() async {
+    if (_qaRunning) return;
+    setState(() => _qaRunning = true);
+    try {
+      final report = await _qaReportService.runRedactedReport();
+      if (!mounted) return;
+      await showModalBottomSheet<void>(
+        context: context,
+        showDragHandle: true,
+        isScrollControlled: true,
+        builder: (context) => LocalQaReportSheet(report: report),
+      );
+    } finally {
+      if (mounted) setState(() => _qaRunning = false);
+    }
   }
 
   String _unlockPolicyLabel(AppUnlockPolicy policy) {
@@ -217,6 +237,14 @@ class _SettingsViewState extends State<SettingsView> {
             sources: widget.datasourcePreferences,
             connectors: widget.connectors,
             onRunConnector: widget.onRunConnector,
+          ),
+          _SettingTile(
+            icon: Icons.fact_check_outlined,
+            title: 'Local QA Report',
+            subtitle: 'Redacted spend, orders, messages, calls and spam checks',
+            ready: !_qaRunning,
+            actionLabel: _qaRunning ? 'Running' : 'Run',
+            onPressed: _qaRunning ? null : _runLocalQaReport,
           ),
           const SizedBox(height: 18),
           _SectionHeader(title: 'Connectors'),
@@ -483,6 +511,159 @@ class _DetectedAppsPanel extends StatelessWidget {
   }
 }
 
+class LocalQaReportSheet extends StatelessWidget {
+  const LocalQaReportSheet({super.key, required this.report});
+
+  final LocalQaReport report;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return SafeArea(
+      child: DraggableScrollableSheet(
+        expand: false,
+        initialChildSize: 0.86,
+        minChildSize: 0.45,
+        maxChildSize: 0.94,
+        builder: (context, controller) {
+          return ListView(
+            controller: controller,
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 18),
+            children: [
+              Row(
+                children: [
+                  Icon(
+                    Icons.fact_check_outlined,
+                    color: theme.colorScheme.primary,
+                  ),
+                  const SizedBox(width: 10),
+                  const Expanded(
+                    child: Text(
+                      'Local QA Report',
+                      style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'Generated ${_formatQaTime(report.generatedAt)}. Personal content is redacted.',
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              ),
+              const SizedBox(height: 12),
+              _QaRefreshSummary(summary: report.refreshSummary),
+              const SizedBox(height: 12),
+              for (final item in report.items)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 10),
+                  child: _QaReportItemCard(item: item),
+                ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+}
+
+class _QaRefreshSummary extends StatelessWidget {
+  const _QaRefreshSummary({required this.summary});
+
+  final String summary;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Theme.of(context).colorScheme.primary.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Text(summary, style: Theme.of(context).textTheme.bodySmall),
+    );
+  }
+}
+
+class _QaReportItemCard extends StatelessWidget {
+  const _QaReportItemCard({required this.item});
+
+  final LocalQaReportItem item;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final sourceText = item.sourceBreakdown.isEmpty
+        ? 'No evidence'
+        : item.sourceBreakdown.entries
+              .map((entry) => '${entry.key}: ${entry.value}')
+              .join(' / ');
+    return Material(
+      color: theme.colorScheme.surface,
+      borderRadius: BorderRadius.circular(8),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              item.question,
+              style: const TextStyle(fontWeight: FontWeight.w800),
+            ),
+            const SizedBox(height: 8),
+            Text(item.answer, maxLines: 5, overflow: TextOverflow.ellipsis),
+            const SizedBox(height: 10),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                _SmallPill(
+                  label: 'Evidence ${item.evidenceCount}',
+                  color: theme.colorScheme.primary,
+                  icon: Icons.dataset_outlined,
+                ),
+                _SmallPill(
+                  label: sourceText,
+                  color: const Color(0xFF64748B),
+                  icon: Icons.storage_outlined,
+                ),
+              ],
+            ),
+            if (item.redactedSnippets.isNotEmpty) ...[
+              const SizedBox(height: 10),
+              for (final snippet in item.redactedSnippets)
+                Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: Text(
+                    snippet,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: theme.colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+String _formatQaTime(DateTime date) {
+  final day = date.day.toString().padLeft(2, '0');
+  final month = date.month.toString().padLeft(2, '0');
+  final hour = date.hour.toString().padLeft(2, '0');
+  final minute = date.minute.toString().padLeft(2, '0');
+  return '$day/$month/${date.year} $hour:$minute';
+}
+
 class _SectionHeader extends StatelessWidget {
   const _SectionHeader({required this.title});
 
@@ -717,9 +898,7 @@ class _ConnectorActionsPanel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final visible = connectors
-        .where((connector) => connector.definition.id != 'health_connect')
-        .toList();
+    final visible = connectors;
     if (visible.isEmpty) {
       return const Card(
         elevation: 0,
@@ -918,7 +1097,7 @@ bool _isSourceEnabled(List<Map<String, dynamic>> sources, String sourceId) {
 }
 
 bool _showSourceInSettings(String? sourceId) {
-  return sourceId != 'health_connect' && sourceId != 'sms_calls_future';
+  return sourceId != 'sms_calls_future';
 }
 
 int _sourceSortOrder(String sourceId) {
@@ -929,7 +1108,8 @@ int _sourceSortOrder(String sourceId) {
     'gmail_notifications' => 3,
     'whatsapp_context' => 4,
     'notifications' => 5,
-    'health_connect' => 90,
+    'health_connect' => 6,
+    'call_logs' => 7,
     'sms_calls_future' => 91,
     _ => 80,
   };
@@ -944,7 +1124,8 @@ String _sourceTitle(String sourceId, String? fallback) {
     'whatsapp_context' => 'WhatsApp Notifications',
     'notifications' => 'Payment and App Notifications',
     'health_connect' => 'Health Connect',
-    'sms_calls_future' => 'Call Logs',
+    'call_logs' => 'Call Logs',
+    'sms_calls_future' => 'Legacy Call Logs',
     _ => fallback ?? sourceId,
   };
 }
@@ -957,8 +1138,9 @@ String _sourceSubtitle(String sourceId, bool enabled) {
     'gmail_notifications' => 'Gmail notification summaries',
     'whatsapp_context' => 'WhatsApp notification context',
     'notifications' => 'Payment and app notifications',
-    'health_connect' => 'Optional supported health records',
-    'sms_calls_future' => 'Future call-log spam review',
+    'health_connect' => 'Steps and sleep from user-approved Health Connect',
+    'call_logs' => 'Missed, incoming and outgoing call metadata',
+    'sms_calls_future' => 'Legacy call-log placeholder',
     _ => 'Local source',
   };
   return enabled ? '$purpose. PIE can use it.' : '$purpose. Off for now.';
@@ -973,6 +1155,7 @@ IconData _sourceIcon(String sourceId) {
     'whatsapp_context' => Icons.chat_outlined,
     'notifications' => Icons.notifications_active_outlined,
     'health_connect' => Icons.health_and_safety_outlined,
+    'call_logs' => Icons.call_outlined,
     'sms_calls_future' => Icons.call_outlined,
     _ => Icons.data_object_outlined,
   };
@@ -984,6 +1167,8 @@ IconData _connectorIcon(String connectorId) {
     'gmail_notifications' => Icons.mail_outline,
     'sms_messages' => Icons.sms_outlined,
     'whatsapp_context' => Icons.chat_outlined,
+    'health_connect' => Icons.health_and_safety_outlined,
+    'call_logs' => Icons.call_outlined,
     _ => Icons.link_outlined,
   };
 }
@@ -994,6 +1179,8 @@ Color _connectorAccent(String connectorId) {
     'gmail_notifications' => const Color(0xFF2563EB),
     'sms_messages' => const Color(0xFF22C55E),
     'whatsapp_context' => const Color(0xFF16A34A),
+    'health_connect' => const Color(0xFF0D9488),
+    'call_logs' => const Color(0xFFF59E0B),
     _ => const Color(0xFF38BDF8),
   };
 }
