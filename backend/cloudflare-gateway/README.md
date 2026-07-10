@@ -29,6 +29,16 @@ npx wrangler secret put LLM_API_KEY
 npx wrangler secret put LLM_ENDPOINT
 ```
 
+Optional image-generation configuration:
+
+```powershell
+npx wrangler secret put GEMINI_API_KEY
+```
+
+`GEMINI_IMAGE_MODEL` defaults to `gemini-2.5-flash-image`. For a non-Gemini
+provider, set `IMAGE_ENDPOINT` and optionally `IMAGE_API_KEY`; the endpoint must
+return `image_url` or `image_base64`.
+
 If Workers AI is enabled in your Cloudflare account, the `AI` binding in
 `wrangler.toml` is used automatically. The default model is configured in
 `LLM_MODEL`.

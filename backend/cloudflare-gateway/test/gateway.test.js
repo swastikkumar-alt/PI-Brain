@@ -50,3 +50,15 @@ test("extracts OpenAI-compatible text", () => {
     "ok",
   );
 });
+
+test("image endpoint reports unconfigured provider", async () => {
+  const response = await handleRequest(
+    new Request("https://example.test/api/v1/images/generate", {
+      method: "POST",
+      body: JSON.stringify({ prompt: "generate image of a dashboard" }),
+    }),
+  );
+  assert.equal(response.status, 501);
+  const body = await response.json();
+  assert.equal(body.error, "image_provider_not_configured");
+});
