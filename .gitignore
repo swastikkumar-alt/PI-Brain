@@ -1,0 +1,61 @@
+# OS and editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.iml
+*.log
+*.tmp
+
+# Flutter / Dart generated files
+**/.dart_tool/
+**/.flutter-plugins
+**/.flutter-plugins-dependencies
+**/.pub-cache/
+**/.pub/
+**/build/
+**/coverage/
+**/android/.gradle/
+**/android/local.properties
+**/ios/Flutter/.last_build_id
+**/ios/Pods/
+
+# Android / Java generated files
+**/.gradle/
+**/.kotlin/
+**/android/app/debug/
+**/android/app/profile/
+**/android/app/release/
+*.hprof
+hs_err_pid*.log
+replay_pid*.log
+
+# Node / Cloudflare generated files
+**/node_modules/
+**/.wrangler/
+**/.dev.vars
+**/.env
+**/.env.*
+!**/.env.example
+
+# Local credentials and generated secrets
+*.keystore
+*.jks
+key.properties
+google-services.json
+GoogleService-Info.plist
+
+# Local QA artifacts captured from connected devices
+/pie_*.png
+/pie_*.xml
+/screencap*.png
+/mobile/*.png
+/mobile/*.xml
+/whatsapp_contact_exporter/*.png
+/whatsapp_contact_exporter/*.xml
+/whatsapp_contact_exporter/*latest_mobile.csv
+
+# Large export artifacts; keep source code, not local user exports
+*.apk
+*.aab
+*.ipa

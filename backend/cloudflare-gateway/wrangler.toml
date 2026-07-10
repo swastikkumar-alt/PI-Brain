@@ -1,0 +1,11 @@
+name = "pie-llm-gateway"
+main = "src/index.js"
+compatibility_date = "2026-07-01"
+
+[vars]
+PIE_ALLOWED_ORIGIN = "*"
+PIE_MAX_BODY_BYTES = "131072"
+LLM_MODEL = "@cf/meta/llama-3.1-8b-instruct"
+
+[ai]
+binding = "AI"

@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="pie_accessibility_service_description">PIE uses Accessibility on your private device only after approval to verify WhatsApp recipient and message fields before tapping Send.</string>
+</resources>

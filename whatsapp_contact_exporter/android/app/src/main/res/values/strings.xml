@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">WA Group Extractor</string>
+    <string name="whatsapp_capture_accessibility_description">Stages visible WhatsApp group/member text for review inside WA Group Extractor. It does not send messages or save data without review.</string>
+</resources>
