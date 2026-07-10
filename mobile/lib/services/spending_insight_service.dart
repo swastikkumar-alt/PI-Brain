@@ -60,7 +60,8 @@ class SpendingInsightService {
   final DateTime Function() _nowProvider;
 
   static final _amountPattern = RegExp(
-    r'(?:₹|rs\.?|inr)\s*([0-9][0-9,]*(?:\.\d{1,2})?)|([0-9][0-9,]*(?:\.\d{1,2})?)\s*(?:rs\.?|inr)',
+    '(?:\\u20B9|rs\\.?|inr)\\s*([0-9][0-9,]*(?:\\.\\d{1,2})?)|'
+    '([0-9][0-9,]*(?:\\.\\d{1,2})?)\\s*(?:\\u20B9|rs\\.?|inr)',
     caseSensitive: false,
   );
 
@@ -95,24 +96,50 @@ class SpendingInsightService {
     ),
   ];
 
-  bool canHandle(String query) {
-    final normalized = _normalizeText(query);
-    final asksAboutSpend = RegExp(
-      r'\b(spend|spent|expense|expenses|expenditure|paid|payment|kharcha|kharch)\b',
-      caseSensitive: false,
-    ).hasMatch(normalized);
-    final hasTimeRange = RegExp(
-      r'\b(yesterday|yesteerday|yesterda|yesterd|kal|last day|previous day|today)\b',
-      caseSensitive: false,
-    ).hasMatch(normalized);
+  static const _monthNames = <String, int>{
+    'jan': 1,
+    'january': 1,
+    'feb': 2,
+    'february': 2,
+    'mar': 3,
+    'march': 3,
+    'apr': 4,
+    'april': 4,
+    'may': 5,
+    'jun': 6,
+    'june': 6,
+    'jul': 7,
+    'july': 7,
+    'aug': 8,
+    'august': 8,
+    'sep': 9,
+    'sept': 9,
+    'september': 9,
+    'oct': 10,
+    'october': 10,
+    'nov': 11,
+    'november': 11,
+    'dec': 12,
+    'december': 12,
+  };
 
-    return asksAboutSpend && hasTimeRange;
+  bool canHandle(String query) {
+    return _hasSpendIntent(query);
   }
 
   Future<SpendingInsightResult?> answerIfSupported(String query) async {
-    if (!canHandle(query)) return null;
+    if (!_hasSpendIntent(query)) return null;
 
-    final range = resolveRange(query, now: _nowProvider());
+    final range = tryResolveRange(query, now: _nowProvider());
+    if (range == null) {
+      return SpendingInsightResult(
+        answer:
+            'Tell me the period to calculate spend, for example: "how much did I spend today", "yesterday", "on 8 July", or "this month till date". I will only count synced SMS, Gmail, and payment notification evidence.',
+        range: _todayRange(_nowProvider()),
+        transactions: const [],
+      );
+    }
+
     final entities = await _database.getEntitiesCreatedBetween(
       startAt: range.start.millisecondsSinceEpoch,
       endAt: range.end.millisecondsSinceEpoch,
@@ -123,9 +150,25 @@ class SpendingInsightService {
   }
 
   SpendingDateRange resolveRange(String query, {DateTime? now}) {
+    return tryResolveRange(query, now: now) ??
+        _todayRange(now ?? _nowProvider());
+  }
+
+  SpendingDateRange? tryResolveRange(String query, {DateTime? now}) {
     final base = now ?? _nowProvider();
     final lower = _normalizeText(query);
     final today = DateTime(base.year, base.month, base.day);
+
+    if (RegExp(
+      r'\b(this month|current month|month to date|month-to-date|mtd|till date|to date|month till date)\b',
+      caseSensitive: false,
+    ).hasMatch(lower)) {
+      return SpendingDateRange(
+        label: 'this month till date',
+        start: DateTime(today.year, today.month),
+        end: today.add(const Duration(days: 1)),
+      );
+    }
 
     if (RegExp(
       r'\b(yesterday|yesteerday|yesterda|yesterd|kal|last day|previous day)\b',
@@ -135,11 +178,20 @@ class SpendingInsightService {
       return SpendingDateRange(label: 'yesterday', start: start, end: today);
     }
 
-    return SpendingDateRange(
-      label: 'today',
-      start: today,
-      end: today.add(const Duration(days: 1)),
-    );
+    if (RegExp(r'\b(today|aaj)\b', caseSensitive: false).hasMatch(lower)) {
+      return _todayRange(base);
+    }
+
+    final explicitDate = _parseExplicitDate(lower, today);
+    if (explicitDate != null) {
+      return SpendingDateRange(
+        label: _dateLabel(explicitDate),
+        start: explicitDate,
+        end: explicitDate.add(const Duration(days: 1)),
+      );
+    }
+
+    return null;
   }
 
   SpendingInsightResult buildResult({
@@ -195,7 +247,7 @@ class SpendingInsightService {
       return SpendingTransaction(
         entityId: entity.id,
         amount: amount,
-        currencySymbol: '₹',
+        currencySymbol: '\u20B9',
         sourceConnector: entity.sourceConnector ?? 'unknown',
         evidence: _snippet(content),
         timestamp: entity.createdAt,
@@ -249,7 +301,7 @@ class SpendingInsightService {
       0,
       (sum, transaction) => sum + transaction.amount,
     );
-    final dateLabel = _dateLabel(range.start);
+    final dateLabel = _rangeLabel(range);
     final buffer = StringBuffer()
       ..writeln(
         'For $dateLabel, I found ${transactions.length} spending transaction${transactions.length == 1 ? '' : 's'} in your synced local data.',
@@ -282,12 +334,84 @@ class SpendingInsightService {
   }
 
   String _buildNoDataAnswer(SpendingDateRange range, List<Entity> entities) {
-    final dateLabel = _dateLabel(range.start);
+    final dateLabel = _rangeLabel(range);
     if (entities.isEmpty) {
-      return 'I could not calculate spend for $dateLabel because no SMS, Gmail, or payment notification data is synced locally for that date. Turn on SMS Messages and payment/bank notifications in Choose what PIE can read, run SMS import, then ask again.';
+      return 'I could not calculate spend for $dateLabel because no SMS, Gmail, or payment notification data is synced locally for that period. Turn on SMS Messages and payment/bank notifications in Choose what PIE can read, run SMS import, then ask again.';
     }
 
     return 'I checked ${entities.length} synced local item${entities.length == 1 ? '' : 's'} for $dateLabel, but found no debit/payment transaction evidence. I did not count credits, refunds, cashback, OTP, pending, or failed transaction messages.';
+  }
+
+  SpendingDateRange _todayRange(DateTime base) {
+    final today = DateTime(base.year, base.month, base.day);
+    return SpendingDateRange(
+      label: 'today',
+      start: today,
+      end: today.add(const Duration(days: 1)),
+    );
+  }
+
+  DateTime? _parseExplicitDate(String lower, DateTime today) {
+    final dayMonth = RegExp(
+      r'\b(?:on\s+)?([0-3]?\d)(?:st|nd|rd|th)?[\s/-]+([a-z]{3,9}|\d{1,2})(?:[\s,/-]+(\d{2,4}))?\b',
+      caseSensitive: false,
+    ).firstMatch(lower);
+    if (dayMonth != null) {
+      final day = int.tryParse(dayMonth.group(1) ?? '');
+      final month = _parseMonth(dayMonth.group(2));
+      final year = _parseYear(dayMonth.group(3), today);
+      return _validPastDate(day: day, month: month, year: year, today: today);
+    }
+
+    final monthDay = RegExp(
+      r'\b(?:on\s+)?([a-z]{3,9})[\s/-]+([0-3]?\d)(?:st|nd|rd|th)?(?:[\s,/-]+(\d{2,4}))?\b',
+      caseSensitive: false,
+    ).firstMatch(lower);
+    if (monthDay != null) {
+      final month = _parseMonth(monthDay.group(1));
+      final day = int.tryParse(monthDay.group(2) ?? '');
+      final year = _parseYear(monthDay.group(3), today);
+      return _validPastDate(day: day, month: month, year: year, today: today);
+    }
+
+    return null;
+  }
+
+  int? _parseMonth(String? value) {
+    if (value == null || value.isEmpty) return null;
+    final numeric = int.tryParse(value);
+    if (numeric != null) return numeric;
+    return _monthNames[value.toLowerCase()];
+  }
+
+  int _parseYear(String? rawYear, DateTime today) {
+    final parsed = int.tryParse(rawYear ?? '');
+    if (parsed == null) return today.year;
+    return parsed < 100 ? 2000 + parsed : parsed;
+  }
+
+  DateTime? _validPastDate({
+    required int? day,
+    required int? month,
+    required int year,
+    required DateTime today,
+  }) {
+    if (day == null || month == null || month < 1 || month > 12) return null;
+    final candidate = DateTime(year, month, day);
+    if (candidate.year != year ||
+        candidate.month != month ||
+        candidate.day != day) {
+      return null;
+    }
+    if (candidate.isAfter(today)) {
+      final previousYear = DateTime(year - 1, month, day);
+      if (previousYear.year == year - 1 &&
+          previousYear.month == month &&
+          previousYear.day == day) {
+        return previousYear;
+      }
+    }
+    return candidate;
   }
 
   double? _parseAmount(String? value) {
@@ -330,13 +454,28 @@ class SpendingInsightService {
     return DateFormat('d MMM yyyy').format(date);
   }
 
+  String _rangeLabel(SpendingDateRange range) {
+    final singleDay = range.end.difference(range.start).inDays == 1;
+    if (singleDay) return _dateLabel(range.start);
+    final inclusiveEnd = range.end.subtract(const Duration(days: 1));
+    return '${_dateLabel(range.start)} to ${_dateLabel(inclusiveEnd)}';
+  }
+
   String _formatCurrency(double amount) {
     final decimals = amount == amount.roundToDouble() ? 0 : 2;
     return NumberFormat.currency(
       locale: 'en_IN',
-      symbol: '₹',
+      symbol: '\u20B9',
       decimalDigits: decimals,
     ).format(amount);
+  }
+
+  bool _hasSpendIntent(String query) {
+    final normalized = _normalizeText(query);
+    return RegExp(
+      r'\b(spend|spent|expense|expenses|expenditure|paid|payment|kharcha|kharch)\b',
+      caseSensitive: false,
+    ).hasMatch(normalized);
   }
 
   String _normalizeText(String value) {
