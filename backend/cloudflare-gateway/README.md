@@ -30,7 +30,8 @@ npx wrangler secret put LLM_ENDPOINT
 ```
 
 If Workers AI is enabled in your Cloudflare account, the `AI` binding in
-`wrangler.toml` is used automatically.
+`wrangler.toml` is used automatically. The default model is configured in
+`LLM_MODEL`.
 
 Mobile build example:
 

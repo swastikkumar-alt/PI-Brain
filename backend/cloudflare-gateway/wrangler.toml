@@ -5,7 +5,7 @@ compatibility_date = "2026-07-01"
 [vars]
 PIE_ALLOWED_ORIGIN = "*"
 PIE_MAX_BODY_BYTES = "131072"
-LLM_MODEL = "@cf/meta/llama-3.1-8b-instruct"
+LLM_MODEL = "@cf/meta/llama-3.1-8b-instruct-fast"
 
 [ai]
 binding = "AI"
