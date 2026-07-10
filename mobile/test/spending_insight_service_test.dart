@@ -117,6 +117,27 @@ void main() {
       expect(result.answer, contains('**Total spent: ₹150**'));
     });
 
+    test('does not treat SMS metadata timestamp as transaction amount', () {
+      final range = service.resolveRange('spend yesterday', now: now);
+      final result = service.buildResult(
+        query: 'how much did I spend yesterday',
+        range: range,
+        entities: [
+          _entity(
+            id: 'sms_with_metadata_date',
+            content:
+                'Received SMS\nFrom/To: BANK\nDate: 1783617689789\n\n'
+                'Rs. 75 debited from A/c XX123 at SAGAR TANAJI. UPI Ref 999999999999.',
+          ),
+        ],
+      );
+
+      expect(result.transactions, hasLength(1));
+      expect(result.transactions.single.amount, 75);
+      expect(result.answer, contains('**Total spent: ₹75**'));
+      expect(result.answer, isNot(contains('1783617689789')));
+    });
+
     test('totals month-to-date transactions with explicit range label', () {
       final range = service.resolveRange(
         'how much did I spent this month till date',

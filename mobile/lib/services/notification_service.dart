@@ -140,8 +140,8 @@ class NotificationService {
   bool _looksLikePaymentNotification(String title, String text) {
     final combined = '$title $text'.toLowerCase();
     final hasAmount = RegExp(
-      '(?:\\u20B9|rs\\.?|inr)\\s*[0-9][0-9,]*(?:\\.\\d{1,2})?|'
-      '[0-9][0-9,]*(?:\\.\\d{1,2})?\\s*(?:\\u20B9|rs\\.?|inr)',
+      '(?:\\u20B9|rs\\.?|inr)[ \\t]*[0-9][0-9,]*(?:\\.\\d{1,2})?|'
+      '[0-9][0-9,]*(?:\\.\\d{1,2})?[ \\t]*(?:\\u20B9|rs\\.?|inr)',
       caseSensitive: false,
     ).hasMatch(combined);
     if (!hasAmount) return false;

@@ -72,7 +72,7 @@ void main() {
       );
 
       expect(prompt, contains('local-data reasoning core'));
-      expect(prompt, contains('which data source must be connected'));
+      expect(prompt, contains('synced evidence is insufficient'));
     });
   });
 }

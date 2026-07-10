@@ -121,9 +121,11 @@ class AgentPromptPolicy {
     if (mode == AgentResponseMode.localGrounded) {
       return '''
 You are the local-data reasoning core for the Personal Intelligence Engine (PIE).
-Answer only from the retrieved local phone data, graph context, memory files, or attached file content.
+Answer only from the numbered retrieved local evidence, memory files, or attached file content.
 Do not invent phone-local facts, transactions, messages, orders, contacts, health data, or app data.
-If the local data is not enough, say clearly which data source must be connected or synced next.
+If the evidence does not contain the requested fact, say that the synced evidence is insufficient and name the missing source.
+For totals, counts, dates, and status checks, use only values present in the evidence. Do not estimate or fill gaps.
+Keep the answer concise and mention the source type when it matters.
 
 Retrieved Local Context:
 $context

@@ -2,6 +2,7 @@ import 'package:intl/intl.dart';
 
 import '../models/entity.dart';
 import 'database_service.dart';
+import 'query_date_range_resolver.dart';
 
 class SpendingDateRange {
   const SpendingDateRange({
@@ -53,15 +54,18 @@ class SpendingInsightService {
   SpendingInsightService({
     DatabaseService? database,
     DateTime Function()? nowProvider,
+    QueryDateRangeResolver? dateRangeResolver,
   }) : _database = database ?? DatabaseService.instance,
-       _nowProvider = nowProvider ?? DateTime.now;
+       _nowProvider = nowProvider ?? DateTime.now,
+       _dateRangeResolver = dateRangeResolver ?? const QueryDateRangeResolver();
 
   final DatabaseService _database;
   final DateTime Function() _nowProvider;
+  final QueryDateRangeResolver _dateRangeResolver;
 
   static final _amountPattern = RegExp(
-    '(?:\\u20B9|rs\\.?|inr)\\s*([0-9][0-9,]*(?:\\.\\d{1,2})?)|'
-    '([0-9][0-9,]*(?:\\.\\d{1,2})?)\\s*(?:\\u20B9|rs\\.?|inr)',
+    '(?:\\u20B9|rs\\.?|inr)[ \\t]*([0-9][0-9,]*(?:\\.\\d{1,2})?)|'
+    '([0-9][0-9,]*(?:\\.\\d{1,2})?)[ \\t]*(?:\\u20B9|rs\\.?|inr)',
     caseSensitive: false,
   );
 
@@ -96,33 +100,6 @@ class SpendingInsightService {
     ),
   ];
 
-  static const _monthNames = <String, int>{
-    'jan': 1,
-    'january': 1,
-    'feb': 2,
-    'february': 2,
-    'mar': 3,
-    'march': 3,
-    'apr': 4,
-    'april': 4,
-    'may': 5,
-    'jun': 6,
-    'june': 6,
-    'jul': 7,
-    'july': 7,
-    'aug': 8,
-    'august': 8,
-    'sep': 9,
-    'sept': 9,
-    'september': 9,
-    'oct': 10,
-    'october': 10,
-    'nov': 11,
-    'november': 11,
-    'dec': 12,
-    'december': 12,
-  };
-
   bool canHandle(String query) {
     return _hasSpendIntent(query);
   }
@@ -156,42 +133,13 @@ class SpendingInsightService {
 
   SpendingDateRange? tryResolveRange(String query, {DateTime? now}) {
     final base = now ?? _nowProvider();
-    final lower = _normalizeText(query);
-    final today = DateTime(base.year, base.month, base.day);
-
-    if (RegExp(
-      r'\b(this month|current month|month to date|month-to-date|mtd|till date|to date|month till date)\b',
-      caseSensitive: false,
-    ).hasMatch(lower)) {
-      return SpendingDateRange(
-        label: 'this month till date',
-        start: DateTime(today.year, today.month),
-        end: today.add(const Duration(days: 1)),
-      );
-    }
-
-    if (RegExp(
-      r'\b(yesterday|yesteerday|yesterda|yesterd|kal|last day|previous day)\b',
-      caseSensitive: false,
-    ).hasMatch(lower)) {
-      final start = today.subtract(const Duration(days: 1));
-      return SpendingDateRange(label: 'yesterday', start: start, end: today);
-    }
-
-    if (RegExp(r'\b(today|aaj)\b', caseSensitive: false).hasMatch(lower)) {
-      return _todayRange(base);
-    }
-
-    final explicitDate = _parseExplicitDate(lower, today);
-    if (explicitDate != null) {
-      return SpendingDateRange(
-        label: _dateLabel(explicitDate),
-        start: explicitDate,
-        end: explicitDate.add(const Duration(days: 1)),
-      );
-    }
-
-    return null;
+    final resolved = _dateRangeResolver.tryResolve(query, now: base);
+    if (resolved == null) return null;
+    return SpendingDateRange(
+      label: resolved.label,
+      start: resolved.start,
+      end: resolved.end,
+    );
   }
 
   SpendingInsightResult buildResult({
@@ -349,69 +297,6 @@ class SpendingInsightService {
       start: today,
       end: today.add(const Duration(days: 1)),
     );
-  }
-
-  DateTime? _parseExplicitDate(String lower, DateTime today) {
-    final dayMonth = RegExp(
-      r'\b(?:on\s+)?([0-3]?\d)(?:st|nd|rd|th)?[\s/-]+([a-z]{3,9}|\d{1,2})(?:[\s,/-]+(\d{2,4}))?\b',
-      caseSensitive: false,
-    ).firstMatch(lower);
-    if (dayMonth != null) {
-      final day = int.tryParse(dayMonth.group(1) ?? '');
-      final month = _parseMonth(dayMonth.group(2));
-      final year = _parseYear(dayMonth.group(3), today);
-      return _validPastDate(day: day, month: month, year: year, today: today);
-    }
-
-    final monthDay = RegExp(
-      r'\b(?:on\s+)?([a-z]{3,9})[\s/-]+([0-3]?\d)(?:st|nd|rd|th)?(?:[\s,/-]+(\d{2,4}))?\b',
-      caseSensitive: false,
-    ).firstMatch(lower);
-    if (monthDay != null) {
-      final month = _parseMonth(monthDay.group(1));
-      final day = int.tryParse(monthDay.group(2) ?? '');
-      final year = _parseYear(monthDay.group(3), today);
-      return _validPastDate(day: day, month: month, year: year, today: today);
-    }
-
-    return null;
-  }
-
-  int? _parseMonth(String? value) {
-    if (value == null || value.isEmpty) return null;
-    final numeric = int.tryParse(value);
-    if (numeric != null) return numeric;
-    return _monthNames[value.toLowerCase()];
-  }
-
-  int _parseYear(String? rawYear, DateTime today) {
-    final parsed = int.tryParse(rawYear ?? '');
-    if (parsed == null) return today.year;
-    return parsed < 100 ? 2000 + parsed : parsed;
-  }
-
-  DateTime? _validPastDate({
-    required int? day,
-    required int? month,
-    required int year,
-    required DateTime today,
-  }) {
-    if (day == null || month == null || month < 1 || month > 12) return null;
-    final candidate = DateTime(year, month, day);
-    if (candidate.year != year ||
-        candidate.month != month ||
-        candidate.day != day) {
-      return null;
-    }
-    if (candidate.isAfter(today)) {
-      final previousYear = DateTime(year - 1, month, day);
-      if (previousYear.year == year - 1 &&
-          previousYear.month == month &&
-          previousYear.day == day) {
-        return previousYear;
-      }
-    }
-    return candidate;
   }
 
   double? _parseAmount(String? value) {

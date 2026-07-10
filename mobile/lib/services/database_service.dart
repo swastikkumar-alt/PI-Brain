@@ -28,6 +28,20 @@ class EntityDedupeResult {
   final int hashesBackfilled;
 }
 
+class SearchIndexMaintenanceResult {
+  const SearchIndexMaintenanceResult({
+    required this.inserted,
+    required this.updated,
+    required this.deleted,
+  });
+
+  final int inserted;
+  final int updated;
+  final int deleted;
+
+  int get changedRows => inserted + updated + deleted;
+}
+
 class _EntityHashBackfill {
   const _EntityHashBackfill({
     required this.sourceConnector,
@@ -47,6 +61,7 @@ class DatabaseService {
   static const _legacyPlaintextDatabaseName = 'pie_local_secure_v2.db';
   static const _databasePasswordKey = 'pie_sqlcipher_password_v1';
   static final Sha256 _sha256 = Sha256();
+  static DateTime? _lastSearchIndexRepair;
 
   DatabaseService._init();
 
@@ -569,6 +584,77 @@ class DatabaseService {
     return terms.join(' ');
   }
 
+  String _buildFtsAnyQuery(String rawQuery) {
+    final terms = _meaningfulSearchTerms(
+      rawQuery,
+    ).map((term) => '"${term.replaceAll('"', '""')}"').toList();
+    return terms.join(' OR ');
+  }
+
+  List<String> _meaningfulSearchTerms(String rawQuery, {int limit = 12}) {
+    const stopWords = <String>{
+      'a',
+      'about',
+      'all',
+      'am',
+      'an',
+      'and',
+      'any',
+      'are',
+      'can',
+      'check',
+      'did',
+      'do',
+      'does',
+      'for',
+      'from',
+      'get',
+      'got',
+      'had',
+      'has',
+      'have',
+      'how',
+      'i',
+      'in',
+      'is',
+      'it',
+      'me',
+      'much',
+      'my',
+      'of',
+      'on',
+      'or',
+      'please',
+      'show',
+      'tell',
+      'that',
+      'the',
+      'this',
+      'to',
+      'was',
+      'what',
+      'when',
+      'where',
+      'which',
+      'with',
+      'you',
+    };
+
+    final seen = <String>{};
+    final terms = <String>[];
+    for (final raw
+        in rawQuery
+            .toLowerCase()
+            .replaceAll(RegExp(r'[^a-z0-9@+._\s-]'), ' ')
+            .split(RegExp(r'\s+'))) {
+      final term = raw.trim();
+      if (term.length < 2 || stopWords.contains(term)) continue;
+      if (seen.add(term)) terms.add(term);
+      if (terms.length >= limit) break;
+    }
+    return terms;
+  }
+
   Future<String> stableContentHash({
     required String? sourceConnector,
     required String? content,
@@ -865,6 +951,100 @@ class DatabaseService {
     return List.generate(maps.length, (i) => Entity.fromJson(maps[i]));
   }
 
+  Future<List<Entity>> searchEntitiesForQuery(
+    String query, {
+    List<String> sourceConnectors = const [],
+    int? startAt,
+    int? endAt,
+    int limit = 30,
+  }) async {
+    final db = await instance.database;
+    final ftsQuery = _buildFtsAnyQuery(query);
+    if (ftsQuery.isEmpty) return [];
+
+    final filters = <String>['fts.content MATCH ?'];
+    final args = <Object>[ftsQuery];
+
+    if (startAt != null) {
+      filters.add('e.created_at >= ?');
+      args.add(startAt);
+    }
+    if (endAt != null) {
+      filters.add('e.created_at < ?');
+      args.add(endAt);
+    }
+    if (sourceConnectors.isNotEmpty) {
+      final placeholders = List.filled(sourceConnectors.length, '?').join(',');
+      filters.add('e.source_connector IN ($placeholders)');
+      args.addAll(sourceConnectors);
+    }
+    args.add(limit);
+
+    try {
+      final rows = await db.rawQuery('''
+        SELECT DISTINCT e.*
+        FROM entities_fts fts
+        JOIN entities e ON fts.entity_id = e.id
+        WHERE ${filters.join(' AND ')}
+        ORDER BY e.created_at DESC
+        LIMIT ?
+      ''', args);
+      return List.generate(
+        rows.length,
+        (index) => Entity.fromJson(rows[index]),
+      );
+    } on DatabaseException {
+      return _searchEntitiesByLike(
+        query,
+        sourceConnectors: sourceConnectors,
+        startAt: startAt,
+        endAt: endAt,
+        limit: limit,
+      );
+    }
+  }
+
+  Future<List<Entity>> _searchEntitiesByLike(
+    String query, {
+    List<String> sourceConnectors = const [],
+    int? startAt,
+    int? endAt,
+    int limit = 30,
+  }) async {
+    final db = await instance.database;
+    final terms = _meaningfulSearchTerms(query, limit: 6);
+    if (terms.isEmpty) return [];
+
+    final where = <String>[];
+    final args = <Object>[];
+    if (startAt != null) {
+      where.add('created_at >= ?');
+      args.add(startAt);
+    }
+    if (endAt != null) {
+      where.add('created_at < ?');
+      args.add(endAt);
+    }
+    if (sourceConnectors.isNotEmpty) {
+      final placeholders = List.filled(sourceConnectors.length, '?').join(',');
+      where.add('source_connector IN ($placeholders)');
+      args.addAll(sourceConnectors);
+    }
+    where.add(
+      '(${List.filled(terms.length, 'LOWER(content) LIKE ?').join(' OR ')})',
+    );
+    args.addAll(terms.map((term) => '%$term%'));
+
+    final rows = await db.query(
+      'entities',
+      where: where.join(' AND '),
+      whereArgs: args,
+      orderBy: 'created_at DESC',
+      limit: limit,
+    );
+    return List.generate(rows.length, (index) => Entity.fromJson(rows[index]));
+  }
+
   Future<List<Edge>> getEdgesForEntity(String entityId) async {
     final db = await instance.database;
     final maps = await db.query(
@@ -988,6 +1168,74 @@ class DatabaseService {
     } on DatabaseException {
       return [];
     }
+  }
+
+  Future<SearchIndexMaintenanceResult?> ensureSearchIndexFresh({
+    Duration minInterval = const Duration(minutes: 5),
+  }) async {
+    final now = DateTime.now();
+    final lastRepair = _lastSearchIndexRepair;
+    if (lastRepair != null && now.difference(lastRepair) < minInterval) {
+      return null;
+    }
+    _lastSearchIndexRepair = now;
+    return repairSearchIndex();
+  }
+
+  Future<SearchIndexMaintenanceResult> repairSearchIndex() async {
+    final db = await instance.database;
+    var inserted = 0;
+    var updated = 0;
+    var deleted = 0;
+
+    await db.transaction((txn) async {
+      deleted += await txn.rawDelete('''
+        DELETE FROM entities_fts
+        WHERE entity_id NOT IN (SELECT id FROM entities)
+      ''');
+
+      final rows = await txn.rawQuery('''
+        SELECT e.id, e.content, fts.content AS fts_content
+        FROM entities e
+        LEFT JOIN entities_fts fts ON fts.entity_id = e.id
+        WHERE e.content IS NOT NULL AND TRIM(e.content) <> ''
+      ''');
+
+      for (final row in rows) {
+        final entityId = row['id']?.toString();
+        final content = row['content']?.toString();
+        final indexedContent = row['fts_content']?.toString();
+        if (entityId == null || entityId.isEmpty || content == null) continue;
+
+        if (indexedContent == null) {
+          await txn.insert('entities_fts', {
+            'entity_id': entityId,
+            'content': content,
+          });
+          inserted += 1;
+          continue;
+        }
+
+        if (indexedContent != content) {
+          await txn.delete(
+            'entities_fts',
+            where: 'entity_id = ?',
+            whereArgs: [entityId],
+          );
+          await txn.insert('entities_fts', {
+            'entity_id': entityId,
+            'content': content,
+          });
+          updated += 1;
+        }
+      }
+    });
+
+    return SearchIndexMaintenanceResult(
+      inserted: inserted,
+      updated: updated,
+      deleted: deleted,
+    );
   }
 
   Future<List<Map<String, dynamic>>> searchMemoriesFTS(String query) async {

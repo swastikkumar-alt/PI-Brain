@@ -14,6 +14,7 @@ import 'app_config.dart';
 import 'agent_prompt_policy.dart';
 import 'database_service.dart';
 import 'gateway_settings_service.dart';
+import 'local_query_context_service.dart';
 import 'local_device_insight_service.dart';
 import 'spending_insight_service.dart';
 
@@ -22,6 +23,8 @@ class AgentService {
   final SpendingInsightService _spendingInsight = SpendingInsightService();
   final LocalDeviceInsightService _localDeviceInsight =
       LocalDeviceInsightService();
+  final LocalQueryContextService _localQueryContext =
+      LocalQueryContextService();
   final AgentPromptPolicy _promptPolicy = const AgentPromptPolicy();
   final _uuid = const Uuid();
   final _gatewaySettings = GatewaySettingsService.instance;
@@ -154,33 +157,12 @@ class AgentService {
       return agentMsg;
     }
 
-    // 2. Query local FTS5 search index to find seed nodes
-    final searchSeeds = await _db.searchDocumentsFTS(userMessage);
+    // 2. Build grounded local evidence context and repair stale search index if needed.
+    final localContext = await _localQueryContext.build(userMessage);
+    final contextBuffer = StringBuffer()..writeln(localContext.contextText);
+    final citations = <Citation>[...localContext.citations];
 
-    // 3. Multi-Hop Graph Traversal using Recursive CTE for relational enrichment
-    StringBuffer contextBuffer = StringBuffer();
-    List<Citation> citations = [];
-
-    contextBuffer.writeln('=== KNOWLEDGE GRAPH CTE WALK ===');
-    for (var seed in searchSeeds) {
-      final seedId = seed['entity_id'] as String;
-      final rawWalk = await _db.traverseGraphRecursive(seedId, maxDepth: 2);
-
-      for (var node in rawWalk) {
-        contextBuffer.writeln(
-          '-> [Depth: ${node['depth']}] [Type: ${node['entity_type']}] Content: ${node['content']} (Source: ${node['source_connector'] ?? 'Local'})',
-        );
-        citations.add(
-          Citation(
-            documentId: node['entity_id'],
-            title: 'Graph Node (${node['entity_type']})',
-            chunkIndex: node['depth'] as int,
-          ),
-        );
-      }
-    }
-
-    // 4. Retrieve memories and local system profile details
+    // 3. Retrieve memories and local system profile details
     final userProfile = await readLocalFileMemory('USER.md');
     final coreMemoryNotes = await readLocalFileMemory('MEMORY.md');
 
@@ -188,7 +170,7 @@ class AgentService {
     contextBuffer.writeln('Profile Facts: $userProfile');
     contextBuffer.writeln('Memory Notes: $coreMemoryNotes');
 
-    // 5. Process optional attached file
+    // 4. Process optional attached file
     String fileContext = '';
     String? base64Image;
 
@@ -225,7 +207,20 @@ class AgentService {
       }
     }
 
-    // 6. Structure prompt and instruct LLM
+    if (localContext.noEvidenceAnswer != null && attachedFile == null) {
+      final agentMsg = Message(
+        id: _uuid.v4(),
+        conversationId: conversationId,
+        sender: MessageSender.agent,
+        text: localContext.noEvidenceAnswer!,
+        timestamp: DateTime.now(),
+        citations: const [],
+      );
+      await _db.insertMessage(agentMsg);
+      return agentMsg;
+    }
+
+    // 5. Structure prompt and instruct LLM
     final systemPrompt = _promptPolicy.buildSystemPrompt(
       userMessage: userMessage,
       retrievedContext: _truncate(
