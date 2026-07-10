@@ -11,6 +11,7 @@ import '../models/edge.dart';
 import '../models/sync_event.dart';
 import '../models/message.dart';
 import 'app_config.dart';
+import 'agent_prompt_policy.dart';
 import 'database_service.dart';
 import 'gateway_settings_service.dart';
 import 'local_device_insight_service.dart';
@@ -21,6 +22,7 @@ class AgentService {
   final SpendingInsightService _spendingInsight = SpendingInsightService();
   final LocalDeviceInsightService _localDeviceInsight =
       LocalDeviceInsightService();
+  final AgentPromptPolicy _promptPolicy = const AgentPromptPolicy();
   final _uuid = const Uuid();
   final _gatewaySettings = GatewaySettingsService.instance;
 
@@ -224,17 +226,14 @@ class AgentService {
     }
 
     // 6. Structure prompt and instruct LLM
-    final systemPrompt =
-        '''
-You are the reasoning core for the Personal Intelligence Engine (PIE).
-Evaluate the retrieved local Graph CTE walk and files.
-Verify that answers strictly correspond to context facts.
-If facts are insufficient, say: "I do not have sufficient local memory files to answer this." Do not hallucinate.
-
-Retrieved Context:
-${_truncate(contextBuffer.toString(), AppConfig.maxRagContextChars)}
-$fileContext
-''';
+    final systemPrompt = _promptPolicy.buildSystemPrompt(
+      userMessage: userMessage,
+      retrievedContext: _truncate(
+        contextBuffer.toString(),
+        AppConfig.maxRagContextChars,
+      ),
+      fileContext: fileContext,
+    );
 
     String agentText = '';
     try {
